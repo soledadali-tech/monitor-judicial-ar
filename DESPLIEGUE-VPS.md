@@ -92,6 +92,39 @@ pise con la siguiente):
     # m h dom mon dow command
     0 8,18 * * * cd ~/monitor-judicial-ar && flock -n /tmp/parte-pjn.lock node parte-diario-pjn.mjs >> parte-pjn.log 2>&1
 
+### Alternativa a cron: `daemon.mjs` bajo systemd
+
+Un solo servicio, sin depender del timezone del cron del sistema (calcula todo en hora
+de Argentina el propio `daemon.mjs`) ni de tres entradas de crontab sueltas. Los
+horarios se configuran en el `.env` (ver README, seccion "Alternativa: daemon.mjs"):
+
+    echo 'CRON_PJN=08:00,18:00' >> .env
+    echo 'CRON_MEV=08:30' >> .env
+
+Servicio systemd (`/etc/systemd/system/monitor-judicial.service`):
+
+    [Unit]
+    Description=monitor-judicial-ar (partes diarios PJN/MEV/EJE)
+    After=network-online.target
+
+    [Service]
+    Type=simple
+    User=ubuntu
+    WorkingDirectory=/home/ubuntu/monitor-judicial-ar
+    ExecStart=/usr/bin/node daemon.mjs
+    Restart=always
+    RestartSec=30
+
+    [Install]
+    WantedBy=multi-user.target
+
+Activar:
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now monitor-judicial.service
+    systemctl status monitor-judicial.service
+    journalctl -u monitor-judicial.service -f   # logs en vivo
+
 ## 6. El primer login (la parte que no es copy-paste)
 
 El bot no usa un archivo de token: Puppeteer levanta con un PERFIL PERSISTENTE

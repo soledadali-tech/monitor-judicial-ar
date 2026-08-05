@@ -85,9 +85,23 @@ async function main() {
   const r = await registrarCausas({ nuevos: eventos });
   log(`CSV de causas: ${r.nuevas} nueva(s). Total: ${r.total}. Archivo: ${r.archivo}`);
 
-  const { actualizarCartera } = await import("./lib/cartera.mjs");
+  const { actualizarCartera, aplicarPlanilla } = await import("./lib/cartera.mjs");
   const rc = await actualizarCartera({ nuevos: eventos });
   log(`Cartera (xlsx): ${rc.nuevas} nueva(s). Total: ${rc.total}. Archivo: ${rc.archivo}`);
+
+  try {
+    const { obtenerPlanilla } = await import("./lib/planilla-causas.mjs");
+    const planilla = await obtenerPlanilla();
+    if (planilla.error) log(`Planilla: ${planilla.stale ? "usando cache anterior, " : ""}${planilla.error}`);
+    const rp = await aplicarPlanilla(planilla.porSistema.PJN);
+    if (rp.nota) log(`Planilla -> cartera: ${rp.nota}`);
+    else {
+      log(`Planilla -> cartera: ${rp.matcheadas} matcheada(s), ${rp.agregadas} agregada(s) desde la planilla.`);
+      if (rp.ambiguas && rp.ambiguas.length) log(`Planilla -> cartera: ${rp.ambiguas.length} ambigua(s) (revisar a mano): ${rp.ambiguas.map((a) => `${a.fuero || "?"} ${a.numero}/${a.anio}`).join(", ")}`);
+    }
+  } catch (e) {
+    log(`Cruce con planilla omitido: ${e.message}`);
+  }
 }
 
 main().then(() => process.exit(0)).catch((e) => { console.error("ERROR:", e.message); process.exit(1); });

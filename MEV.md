@@ -64,6 +64,27 @@ solo se ven entrando con ese fuero.
 4. Arma prioritarias + caducidad + prescripcion penal + agrupado por causa; manda
    mail; heartbeat; alerta de falla (con aviso especifico si la clave MEV vencio).
 
+## Cruce con la planilla "LISTADO JUICIOS" (lib/planilla-causas.mjs)
+
+Ademas de los pasos de arriba, `descubrir-mev.mjs` (al final del barrido) y el parte
+diario (siempre, incluso en modo `auto` sin re-siembra) cruzan `cartera-mev.xlsx` contra
+la planilla de Google Sheets con actor/demandado/materia/firma. El match es por
+**numero de expediente + departamento** (la planilla MEV no trae año, a diferencia de la
+de PJN): se extrae el numero de la columna "Nro Expediente" (formato `COD - NUMERO -
+AÑO` que arma mev-client.mjs) y el depto de "Jurisdiccion" (la clave `Depto[:penal]
+[:familia]` de descubrir-mev.mjs, sin el sufijo).
+
+Dos casos especiales:
+- **Ambigua**: si el numero+depto podria ser mas de una fila de la cartera (mismo
+  numero en distintos organismos del mismo depto), no se completa nada y se reporta en
+  el log para revision manual — nunca se adivina.
+- **Solo en la planilla**: si la planilla conoce una causa que la cartera todavia no
+  tiene (no se sembro/autorizo en el portal), se agrega como fila nueva con
+  `Vigilar=NO` a proposito (no tiene NidCausa real, no se puede consultar en el
+  portal) y una nota en "Observaciones". Cuando `descubrir-mev.mjs` la encuentre de
+  verdad, va a crear una fila aparte con su NidCausa real; ahi conviene borrar la fila
+  vieja "solo planilla".
+
 ## Caducidad de instancia PBA (arts. 310/311/315 CPCC BA, VERIFICADO)
 
 Bifasica, calcada del enfoque CABA pero con la norma provincial (texto literal

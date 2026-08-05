@@ -28,7 +28,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import nodemailer from "nodemailer";
-import { entrarJurisdiccion, causasDeSet, pasosNuevos, parseDia, PAUSA } from "./lib/mev-client.mjs";
+import { entrarJurisdiccion, causasDeSet, pasosNuevos, obtenerProveido, parseDia, PAUSA } from "./lib/mev-client.mjs";
 import { hayCredenciales } from "./lib/mev-auth.mjs";
 import { upsertCausas, leerVigiladas, volcarCalculos } from "./lib/cartera-mev.mjs";
 import { estadoPrevio, registrarPasos } from "./lib/movimientos-mev.mjs";
@@ -148,7 +148,7 @@ function crearTransport() {
   });
 }
 
-function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescripcion) {
+function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescripcion, agenda = []) {
   const porCausa = new Map();
   for (const n of novedades) {
     const k = n.causa.key;
@@ -169,6 +169,21 @@ function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescr
       const neg = RX_NEGATIVA.test(n.paso.descripcion || "") ? " - posible resol. negativa" : "";
       texto += `  [!] ${n.causa.expedienteRef} - ${n.causa.caratula} - ${n.paso.descripcion} (${n.paso.fechaHora || n.paso.fecha}) [${mot}${neg}]\n`;
       html += `<li><b>${n.causa.expedienteRef}</b> - ${n.causa.caratula}<br>${n.paso.descripcion} <span style="color:#1e3a8b">(${n.paso.fechaHora || n.paso.fecha} - ${mot})</span>${neg ? `<span style="color:#b58900"> - posible resol. negativa</span>` : ""}</li>`;
+    }
+    texto += "\n"; html += "</ul></div>";
+  }
+
+  if (agenda.length) {
+    const fmtFechaHora = (a) => {
+      const f = new Intl.DateTimeFormat("es-AR", { day: "2-digit", month: "2-digit", year: "numeric" }).format(a.audiencia.fecha);
+      const h = a.audiencia.hora ? ` ${String(a.audiencia.hora.hh).padStart(2, "0")}:${String(a.audiencia.hora.mm).padStart(2, "0")} hs` : " (sin hora detectada)";
+      return f + h;
+    };
+    texto += `>>> AUDIENCIAS DETECTADAS (${agenda.length}) - VERIFICAR y agendar (.ics adjunto) <<<\n`;
+    html += `<div style="border:2px solid #1e6b3a;border-radius:4px;padding:8px 10px;margin:10px 0"><b style="color:#1e6b3a">AUDIENCIAS DETECTADAS (${agenda.length}) - verificar y agendar (.ics adjunto)</b><ul style="margin:6px 0">`;
+    for (const a of agenda) {
+      texto += `  [AGENDA] ${a.causa.expedienteRef} - ${a.causa.caratula} - ${fmtFechaHora(a)} (confianza: ${a.audiencia.confianza})\n      contexto: "${a.audiencia.contexto}"\n`;
+      html += `<li><b>${a.causa.expedienteRef}</b> - ${a.causa.caratula} - ${fmtFechaHora(a)} <i>(confianza: ${a.audiencia.confianza})</i><br><span style="color:#555;font-size:12px">"${a.audiencia.contexto}"</span></li>`;
     }
     texto += "\n"; html += "</ul></div>";
   }
@@ -203,14 +218,14 @@ function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescr
   return { texto, html, causas: porCausa.size, prioritarias: prioritarias.length, caducidadRevision: (caducidad && caducidad.revision) || 0, prescripcionAlerta: (prescripcion && prescripcion.alerta) || 0 };
 }
 
-async function enviar({ texto, html }, novedades, causas, prioritarias, caducidadRevision = 0, prescripcionAlerta = 0) {
+async function enviar({ texto, html }, novedades, causas, prioritarias, caducidadRevision = 0, prescripcionAlerta = 0, adjuntos = []) {
   const t = crearTransport();
   const fechaCorta = new Intl.DateTimeFormat("es-AR", { timeZone: "America/Argentina/Buenos_Aires", dateStyle: "short" }).format(new Date());
   const prefijo = (prescripcionAlerta ? `[PRESCRIPCION x${prescripcionAlerta}] ` : "") + (caducidadRevision ? `[REVISION CADUCIDAD x${caducidadRevision}] ` : "") + (prioritarias ? `[${prioritarias} PRIORITARIA(S)] ` : "");
   const asunto = `${prefijo}Parte MEV ${fechaCorta} - ${novedades} novedad(es) / ${causas} causa(s)`;
   log("Conectando al servidor de correo...");
-  await t.sendMail({ from: CFG.mailFrom, to: CFG.mailTo, subject: asunto, text: texto, html });
-  log(`Email enviado a ${CFG.mailTo}`);
+  await t.sendMail({ from: CFG.mailFrom, to: CFG.mailTo, subject: asunto, text: texto, html, attachments: adjuntos });
+  log(`Email enviado a ${CFG.mailTo}${adjuntos.length ? ` (${adjuntos.length} adjunto/s)` : ""}`);
 }
 
 function alertaLocal(err, motivoMailFallo) {
@@ -280,6 +295,25 @@ async function main() {
     } catch (e) { log(`Jurisdiccion "${jur.clave}" fallo en siembra: ${e.message}`); }
   }
 
+  // 1.5) Cruce con la planilla "LISTADO JUICIOS": actor/demandado/materia/firma + causas
+  //      que la planilla conoce y todavia no aparecieron en el portal. No toca el portal
+  //      (fetch aparte a Google Sheets + lectura/escritura de cartera-mev.xlsx), asi que
+  //      corre siempre, incluso en modo AUTO_MEV donde no hay re-siembra.
+  try {
+    const { obtenerPlanilla } = await import("./lib/planilla-causas.mjs");
+    const { aplicarPlanilla } = await import("./lib/cartera-mev.mjs");
+    const planilla = await obtenerPlanilla();
+    if (planilla.error) log(`Planilla: ${planilla.stale ? "usando cache anterior, " : ""}${planilla.error}`);
+    const rp = await aplicarPlanilla(planilla.porSistema.MEV);
+    if (rp.nota) log(`Planilla -> cartera: ${rp.nota}`);
+    else {
+      log(`Planilla -> cartera: ${rp.matcheadas} matcheada(s), ${rp.agregadas} agregada(s).`);
+      if (rp.ambiguas && rp.ambiguas.length) log(`Planilla -> cartera: ${rp.ambiguas.length} ambigua(s) (revisar a mano): ${rp.ambiguas.map((a) => `${a.depto} ${a.numero}`).join(", ")}`);
+    }
+  } catch (e) {
+    log(`Cruce con planilla omitido: ${e.message}`);
+  }
+
   // 2) Causas a vigilar.
   const { causas: vigiladas, nota } = await leerVigiladas();
   if (nota) log(`Cartera MEV: ${nota}`);
@@ -297,6 +331,7 @@ async function main() {
   const novedades = [];     // { causa, paso }
   const paraRegistrar = []; // filas CSV
   const fallos = [];
+  const agenda = [];        // { causa, paso, audiencia } - audiencias detectadas (ver lib/agenda-audiencias.mjs)
 
   const porJur = new Map();
   for (const c of vigiladas.slice(0, CFG.maxExp)) {
@@ -328,6 +363,15 @@ async function main() {
           reportables = ficha.pasos.filter((p) => { const f = parseDia(p.fechaHora || p.fecha); return f && f.getTime() >= corteVentana; });
         }
         for (const p of reportables) novedades.push({ causa: c, paso: p });
+        for (const p of reportables) {
+          if (!esPrioritario(p) || !/audiencia|vista de causa/i.test(p.descripcion || "")) continue;
+          try {
+            const prov = await obtenerProveido(jur, c.pidJuzgado, c.nidCausa, p.nPosi);
+            const { extraerAudiencia } = await import("./lib/agenda-audiencias.mjs");
+            const audiencia = extraerAudiencia(prov.texto);
+            if (audiencia) agenda.push({ causa: c, paso: p, audiencia });
+          } catch (e) { log(`Audiencia (causa ${c.nidCausa}, paso ${p.nPosi}): no se pudo leer el proveido - ${e.message}`); }
+        }
         for (const p of [...reportables, ...baseline]) {
           paraRegistrar.push({
             nPosi: p.nPosi, fecha: p.fechaHora || p.fecha, nidCausa: c.nidCausa, pidJuzgado: c.pidJuzgado,
@@ -344,11 +388,78 @@ async function main() {
 
   log(`Novedades en la ventana: ${novedades.length}; ${fallos.length} causa(s) con error.`);
 
+  // Sync a Supabase (tabla public.casos de dashboard-legal). Diseno conservador: ver
+  // lib/sync-supabase.mjs. No-op si SUPABASE_URL/SUPABASE_SERVICE_KEY no estan en .env.
+  try {
+    const { configSupabase, sincronizarCasos } = await import("./lib/sync-supabase.mjs");
+    if (configSupabase()) {
+      const { filasParaSync, extraerNumeroMev, deptoDeJurisdiccion } = await import("./lib/cartera-mev.mjs");
+      const filas = await filasParaSync();
+
+      const norm = (s) => String(s ?? "").toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "").trim();
+      const relevanciaDe = (p) => esPrioritario(p) ? (RX_NEGATIVA.test(p.descripcion || "") ? "critico" : "importante") : "informativo";
+      const hoyPorClave = new Map(); // "numero|depto" -> { ultima, novedades }
+      for (const n of novedades) {
+        const numero = extraerNumeroMev(n.causa.expedienteRef || n.causa.nidCausa);
+        const depto = deptoDeJurisdiccion(n.causa.jurisdiccion);
+        if (!numero || !depto) continue;
+        const k = `${numero}|${norm(depto)}`;
+        const fechaTxt = n.paso.fechaHora || n.paso.fecha || "";
+        const m = fechaTxt.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+        const fechaISO = m ? `${m[3].length === 2 ? "20" + m[3] : m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}` : new Date().toISOString().slice(0, 10);
+        const descripcion = String(n.paso.descripcion || "Novedad").slice(0, 300);
+        const relevancia = relevanciaDe(n.paso);
+        if (!hoyPorClave.has(k)) hoyPorClave.set(k, { ultima: null, novedades: [] });
+        const g = hoyPorClave.get(k);
+        g.novedades.push({ fecha: fechaISO, descripcion, relevancia });
+        if (!g.ultima || fechaISO >= g.ultima.fecha) g.ultima = { fecha: fechaISO, descripcion };
+      }
+
+      const causas = filas.map((f) => {
+        const k = `${f.numero}|${norm(f.depto)}`;
+        const hoy = hoyPorClave.get(k);
+        return {
+          numero: f.numero, depto: f.depto, anio: f.anio,
+          caratula: f.caratula, actor: f.actor, demandado: f.demandado, materia: f.materia, firma: f.firma,
+          juzgado: f.juzgado, estado: f.estado,
+          ultimaActuacion: hoy ? hoy.ultima : null, novedadesNuevas: hoy ? hoy.novedades : [],
+        };
+      });
+
+      const rs = await sincronizarCasos({ sistema: "MEV", causas });
+      if (rs.nota) log(`Sync Supabase: ${rs.nota}`);
+      else {
+        log(`Sync Supabase: ${rs.actualizados} actualizado(s), ${rs.creados} creado(s), ${rs.sinCambios} sin cambios.`);
+        if (rs.ambiguos.length) log(`Sync Supabase: ${rs.ambiguos.length} ambiguo(s) (revisar a mano): ${rs.ambiguos.map((a) => a.numero).join(", ")}`);
+        if (rs.errores.length) log(`Sync Supabase: ${rs.errores.length} error(es): ${rs.errores.map((e) => `${e.numero}: ${e.error}`).join(" | ")}`);
+      }
+    }
+  } catch (e) {
+    log(`Sync a Supabase omitido: ${e.message}`);
+  }
+
   if (novedades.length === 0 && !fallos.length && !CFG.enviarSinNovedades) {
     log("Sin novedades y ENVIAR_SIN_NOVEDADES=false: no se envia correo.");
     await registrarPasos(paraRegistrar);
     registrarCorrida("0 novedades, sin envio");
     return;
+  }
+
+  // .ics por cada audiencia detectada, para agendar con un clic.
+  const adjuntosAgenda = [];
+  if (agenda.length) {
+    log(`Audiencias detectadas: ${agenda.length}`);
+    const { generarICS } = await import("./lib/agenda-audiencias.mjs");
+    for (const a of agenda) {
+      const ics = generarICS({
+        uid: `audiencia-${a.causa.nidCausa}-${a.paso.nPosi}@monitor-judicial-ar`,
+        titulo: `Audiencia - ${a.causa.expedienteRef} - ${a.causa.caratula || ""}`.slice(0, 200),
+        descripcion: `${a.causa.caratula || ""}\n\nDetectado automaticamente (confianza: ${a.audiencia.confianza}). VERIFICAR en la MEV antes de confirmar.\n\n"${a.audiencia.contexto}"`,
+        fecha: a.audiencia.fecha,
+        hora: a.audiencia.hora,
+      });
+      adjuntosAgenda.push({ filename: `audiencia_${String(a.causa.expedienteRef || a.causa.nidCausa).replace(/[^\w.-]+/g, "_")}_${a.paso.nPosi}.ics`, content: ics, contentType: "text/calendar; charset=utf-8" });
+    }
   }
 
   // Caducidad de instancia PBA (lee cartera-mev.xlsx; independiente de las novedades).
@@ -381,8 +492,8 @@ async function main() {
     else log(`Plazos volcados a cartera-mev: ${vc.escritas} fila(s) con computo.`);
   } catch (e) { log(`Volcado de plazos MEV omitido: ${e.message}`); }
 
-  const parte = armarParte(novedades, desc, vigiladas.length, fallos, caducidadRender, prescripcionRender);
-  await enviar(parte, novedades.length, parte.causas, parte.prioritarias, parte.caducidadRevision, parte.prescripcionAlerta);
+  const parte = armarParte(novedades, desc, vigiladas.length, fallos, caducidadRender, prescripcionRender, agenda);
+  await enviar(parte, novedades.length, parte.causas, parte.prioritarias, parte.caducidadRevision, parte.prescripcionAlerta, adjuntosAgenda);
 
   // Registrar despues del mail (si el mail falla, no se marca visto y se reintenta).
   const rc = await registrarPasos(paraRegistrar);

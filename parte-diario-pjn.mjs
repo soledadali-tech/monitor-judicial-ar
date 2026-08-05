@@ -323,10 +323,27 @@ async function bajarUnPdf(token, id) {
   return { ok: false, motivo: "sin resultado" };
 }
 
+// Busca fecha/hora de audiencia en el texto del PDF (best-effort; ver lib/agenda-
+// audiencias.mjs). Solo se llama para PDFs de novedades que ya matchearon "audiencia"
+// o "vista de causa" en el titulo/descripcion, asi que el costo (parsear el PDF) es
+// bajo. Si pdf-parse no esta instalado o el PDF no se puede leer, no corta el parte.
+async function detectarAudiencia(buf) {
+  let PDFParse; try { ({ PDFParse } = await import("pdf-parse")); } catch { return { nota: "falta pdf-parse (npm i pdf-parse)" }; }
+  try {
+    const { extraerAudiencia } = await import("./lib/agenda-audiencias.mjs");
+    const parser = new PDFParse({ data: buf });
+    const { text } = await parser.getText();
+    return extraerAudiencia(text);
+  } catch (e) {
+    return { nota: `no se pudo leer el PDF: ${e.message}` };
+  }
+}
+
 async function descargarPdfs(token, nuevos) {
   const fallos = [];    // { id, clave, motivo }
   const guardados = []; // { claveOriginal, path } - ruta local por PDF, para el Excel
-  if (!CFG.adjuntarPdfs && !CFG.guardarPdfs) return { adjuntos: [], fallos, guardados };
+  const agenda = [];    // { it, clave, audiencia } - audiencias detectadas en los PDFs
+  if (!CFG.adjuntarPdfs && !CFG.guardarPdfs) return { adjuntos: [], fallos, guardados, agenda };
   const conDoc = nuevos.filter((it) => it.hasDocument).slice(0, CFG.maxPdfs);
   const adjuntos = [];
 
@@ -352,16 +369,23 @@ async function descargarPdfs(token, nuevos) {
       guardados.push({ claveOriginal, id: it.id, path: full });
     }
     if (CFG.adjuntarPdfs) adjuntos.push({ filename, content: res.buf });
+
+    if (/audiencia|vista de causa/i.test(textoEvento(it))) {
+      const r = await detectarAudiencia(res.buf);
+      if (r && r.nota) log(`Audiencia (evento ${it.id}): ${r.nota}`);
+      else if (r) agenda.push({ it, clave: claveOriginal, audiencia: r });
+    }
   }
 
   if (dir) log(`PDFs guardados en: ${dir}`);
   if (CFG.adjuntarPdfs) log(`PDFs adjuntados al mail: ${adjuntos.length}`);
   if (fallos.length) log(`PDFs con problema de descarga: ${fallos.length}`);
-  return { adjuntos, fallos, guardados };
+  if (agenda.length) log(`Audiencias detectadas: ${agenda.length}`);
+  return { adjuntos, fallos, guardados, agenda };
 }
 
 // ─── 4) armar el parte (bloque prioritarias + agrupado por fuero) ─────────────
-function armarParte(nuevos, ventanaDesc, fallos, caducidad, penal) {
+function armarParte(nuevos, ventanaDesc, fallos, caducidad, penal, agenda = []) {
   const prioritarias = nuevos.filter(esPrioritario);
 
   const porFuero = new Map();
@@ -390,6 +414,24 @@ function armarParte(nuevos, ventanaDesc, fallos, caducidad, penal) {
       const neg = marcaNegativa(it) ? " - posible resol. negativa/denegatoria" : "";
       texto += `  [!] ${clave} - ${pl.caratulaExpediente || ""} - [${letra(it.tipo)}] ${fmtFecha(it.fechaAccion)} (${mot}${neg})\n`;
       html += `<li><b>${clave}</b> - ${pl.caratulaExpediente || ""} - [${letra(it.tipo)}] ${fmtFecha(it.fechaAccion)} <span style="color:#8b1e1e">(${mot})</span>${neg ? `<span style="color:#b58900"> - posible resol. negativa</span>` : ""}</li>`;
+    }
+    texto += "\n"; html += "</ul></div>";
+  }
+
+  // Audiencias detectadas en los PDFs (best-effort; ver lib/agenda-audiencias.mjs).
+  // Se adjunta un .ics por cada una (armado en main), para agendar con un clic.
+  if (agenda.length) {
+    const fmtFechaHora = (a) => {
+      const f = new Intl.DateTimeFormat("es-AR", { day: "2-digit", month: "2-digit", year: "numeric" }).format(a.audiencia.fecha);
+      const h = a.audiencia.hora ? ` ${String(a.audiencia.hora.hh).padStart(2, "0")}:${String(a.audiencia.hora.mm).padStart(2, "0")} hs` : " (sin hora detectada)";
+      return f + h;
+    };
+    texto += `>>> AUDIENCIAS DETECTADAS (${agenda.length}) - VERIFICAR y agendar (.ics adjunto) <<<\n`;
+    html += `<div style="border:2px solid #1e6b3a;border-radius:4px;padding:8px 10px;margin:10px 0"><b style="color:#1e6b3a">AUDIENCIAS DETECTADAS (${agenda.length}) - verificar y agendar (.ics adjunto)</b><ul style="margin:6px 0">`;
+    for (const a of agenda) {
+      const pl = a.it.payload || {};
+      texto += `  [AGENDA] ${a.clave} - ${pl.caratulaExpediente || ""} - ${fmtFechaHora(a)} (confianza: ${a.audiencia.confianza})\n      contexto: "${a.audiencia.contexto}"\n`;
+      html += `<li><b>${a.clave}</b> - ${pl.caratulaExpediente || ""} - ${fmtFechaHora(a)} <i>(confianza: ${a.audiencia.confianza})</i><br><span style="color:#555;font-size:12px">"${a.audiencia.contexto}"</span></li>`;
     }
     texto += "\n"; html += "</ul></div>";
   }
@@ -549,7 +591,24 @@ async function main() {
     return;
   }
 
-  const { adjuntos, fallos, guardados } = await descargarPdfs(token, nuevos);
+  const { adjuntos, fallos, guardados, agenda } = await descargarPdfs(token, nuevos);
+
+  // .ics por cada audiencia detectada, para agendar con un clic (Google Calendar/
+  // Outlook/Apple Calendar abren un .ics adjunto directo).
+  if (agenda.length) {
+    const { generarICS } = await import("./lib/agenda-audiencias.mjs");
+    for (const a of agenda) {
+      const pl = a.it.payload || {};
+      const ics = generarICS({
+        uid: `audiencia-${a.it.id}@monitor-judicial-ar`,
+        titulo: `Audiencia - ${a.clave} - ${pl.caratulaExpediente || ""}`.slice(0, 200),
+        descripcion: `${pl.caratulaExpediente || ""}\n\nDetectado automaticamente (confianza: ${a.audiencia.confianza}). VERIFICAR contra el PDF adjunto antes de confirmar.\n\n"${a.audiencia.contexto}"`,
+        fecha: a.audiencia.fecha,
+        hora: a.audiencia.hora,
+      });
+      adjuntos.push({ filename: `audiencia_${a.clave.replace(/[^\w.-]+/g, "_")}_${a.it.id}.ics`, content: ics, contentType: "text/calendar; charset=utf-8" });
+    }
+  }
 
   // Cartera autocompletada: el bot agrega/actualiza causas en cartera-pjn.xlsx,
   // conservando las columnas de gestion que carga el usuario.
@@ -560,6 +619,77 @@ async function main() {
     else log(`Cartera (xlsx): ${rcar.nuevas} nueva(s), ${rcar.total} en total.${rcar.archivo ? " Archivo: " + rcar.archivo : ""}`);
   } catch (e) {
     log(`Cartera omitida: ${e.message}`);
+  }
+
+  // Cruce con la planilla "LISTADO JUICIOS" (actor/demandado/materia/firma + causas que
+  // la planilla conoce y el feed todavia no trajo). No requiere el portal: es un fetch
+  // aparte a Google Sheets, asi que si falla no debe cortar el parte.
+  try {
+    const { obtenerPlanilla } = await import("./lib/planilla-causas.mjs");
+    const { aplicarPlanilla } = await import("./lib/cartera.mjs");
+    const planilla = await obtenerPlanilla();
+    if (planilla.error) log(`Planilla: ${planilla.stale ? "usando cache anterior, " : ""}${planilla.error}`);
+    const rp = await aplicarPlanilla(planilla.porSistema.PJN);
+    if (rp.nota) log(`Planilla -> cartera: ${rp.nota}`);
+    else {
+      log(`Planilla -> cartera: ${rp.matcheadas} matcheada(s), ${rp.agregadas} agregada(s) desde la planilla.`);
+      if (rp.ambiguas && rp.ambiguas.length) log(`Planilla -> cartera: ${rp.ambiguas.length} ambigua(s) (revisar a mano): ${rp.ambiguas.map((a) => `${a.fuero || "?"} ${a.numero}/${a.anio}`).join(", ")}`);
+    }
+  } catch (e) {
+    log(`Cruce con planilla omitido: ${e.message}`);
+  }
+
+  // Sync a Supabase (tabla public.casos de dashboard-legal). Diseno conservador: ver
+  // lib/sync-supabase.mjs. No-op si SUPABASE_URL/SUPABASE_SERVICE_KEY no estan en .env.
+  try {
+    const { configSupabase, sincronizarCasos } = await import("./lib/sync-supabase.mjs");
+    if (configSupabase()) {
+      const { filasParaSync, extraerFueroNumAnio } = await import("./lib/cartera.mjs");
+      const { obtenerPlanilla } = await import("./lib/planilla-causas.mjs");
+      const filas = await filasParaSync();
+
+      // inc (causa principal vs incidente) sale de la planilla, no de la cartera.
+      const planilla = await obtenerPlanilla();
+      const incPorClave = new Map();
+      for (const f of planilla.porSistema?.PJN || []) incPorClave.set(`${f.fuero}|${Number(f.numero)}|${anio2De(f.anio)}`, f.inc || "");
+      function anio2De(a) { const s = String(a || "").trim(); return s.length >= 4 ? s.slice(-2) : s.padStart(2, "0"); }
+
+      // Novedades/ultimaActuacion de HOY, agrupadas por causa (fuero|numero|anio2).
+      const hoyPorClave = new Map();
+      for (const it of nuevos) {
+        const info = extraerFueroNumAnio(it.payload?.claveExpediente);
+        if (!info) continue;
+        const k = `${info.fuero}|${info.numero}|${info.anio2}`;
+        const f = new Date(it.fechaAccion || it.fechaCreacion || Date.now());
+        const fechaISO = f.toISOString().slice(0, 10);
+        const descripcion = (it.payload?.tipoEvento || it.payload?.titulo || it.payload?.descripcion || letra(it.tipo) || "Novedad").toString().slice(0, 300);
+        const relevancia = esPrioritario(it) ? (marcaNegativa(it) ? "critico" : "importante") : "informativo";
+        if (!hoyPorClave.has(k)) hoyPorClave.set(k, { ultima: null, novedades: [] });
+        const g = hoyPorClave.get(k);
+        g.novedades.push({ fecha: fechaISO, descripcion, relevancia });
+        if (!g.ultima || fechaISO >= g.ultima.fecha) g.ultima = { fecha: fechaISO, descripcion };
+      }
+
+      const causas = filas.map((f) => {
+        const k = `${f.fuero}|${Number(f.numero)}|${f.anio2}`;
+        const hoy = hoyPorClave.get(k);
+        return {
+          numero: f.numero, fuero: f.fuero, anio: `20${f.anio2}`, inc: incPorClave.has(k) ? incPorClave.get(k) : null,
+          caratula: f.caratula, actor: f.actor, demandado: f.demandado, materia: f.materia, firma: f.firma,
+          ultimaActuacion: hoy ? hoy.ultima : null, novedadesNuevas: hoy ? hoy.novedades : [],
+        };
+      });
+
+      const rs = await sincronizarCasos({ sistema: "PJN", causas });
+      if (rs.nota) log(`Sync Supabase: ${rs.nota}`);
+      else {
+        log(`Sync Supabase: ${rs.actualizados} actualizado(s), ${rs.creados} creado(s), ${rs.sinCambios} sin cambios.`);
+        if (rs.ambiguos.length) log(`Sync Supabase: ${rs.ambiguos.length} ambiguo(s) (revisar a mano): ${rs.ambiguos.map((a) => `${a.numero}${a.inc ? "/inc" + a.inc : ""}`).join(", ")}`);
+        if (rs.errores.length) log(`Sync Supabase: ${rs.errores.length} error(es): ${rs.errores.map((e) => `${e.numero}: ${e.error}`).join(" | ")}`);
+      }
+    }
+  } catch (e) {
+    log(`Sync a Supabase omitido: ${e.message}`);
   }
 
   // Alerta de caducidad de instancia (lee cartera-pjn.xlsx).
@@ -610,7 +740,7 @@ async function main() {
     log(`Volcado de plazos a la cartera omitido: ${e.message}`);
   }
 
-  const parte = armarParte(nuevos, desc, fallos, caducidadRender, penalRender);
+  const parte = armarParte(nuevos, desc, fallos, caducidadRender, penalRender, agenda);
   await enviar(parte, adjuntos, nuevos.length, parte.fueros, parte.prioritarias, parte.revisionCaducidad, parte.aplicabilidadCaducidad);
   registrarCorrida(`${nuevos.length} novedades, ${parte.prioritarias} prioritarias, ${adjuntos.length} PDFs, ${fallos.length} descargas fallidas`);
 

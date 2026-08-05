@@ -120,6 +120,23 @@ async function main() {
     console.log(`(formato Depto[:penal][:familia], separadas por ";"), así el bot no barre las 69 cada dia.`);
   }
   console.log(`\nListo. ${totalCausas} causa(s) vistas, ${totalSembradas} nueva(s) sembrada(s) en cartera-mev.xlsx. Depura con "Vigilar"=NO.`);
+
+  // Cruce con la planilla "LISTADO JUICIOS": actor/demandado/materia/firma + causas que
+  // la planilla conoce y todavia no aparecieron en el portal.
+  try {
+    const { obtenerPlanilla } = await import("./lib/planilla-causas.mjs");
+    const { aplicarPlanilla } = await import("./lib/cartera-mev.mjs");
+    const planilla = await obtenerPlanilla();
+    if (planilla.error) console.log(`Planilla: ${planilla.stale ? "usando cache anterior, " : ""}${planilla.error}`);
+    const rp = await aplicarPlanilla(planilla.porSistema.MEV);
+    if (rp.nota) console.log(`Planilla -> cartera: ${rp.nota}`);
+    else {
+      console.log(`Planilla -> cartera: ${rp.matcheadas} matcheada(s), ${rp.agregadas} agregada(s) (Vigilar=NO hasta que aparezcan en el portal).`);
+      if (rp.ambiguas && rp.ambiguas.length) console.log(`Planilla -> cartera: ${rp.ambiguas.length} ambigua(s) (revisar a mano): ${rp.ambiguas.map((a) => `${a.depto} ${a.numero}`).join(", ")}`);
+    }
+  } catch (e) {
+    console.log(`Cruce con planilla omitido: ${e.message}`);
+  }
 }
 
 main().then(() => process.exit(0)).catch((e) => { console.error("ERROR:", e.message); process.exit(1); });

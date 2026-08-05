@@ -9,6 +9,9 @@ node_modules/
 !.env.mev.example
 config.json
 
+# Cache local de la planilla "LISTADO JUICIOS" (tiene actor/demandado, datos personales).
+planilla-causas-cache.json
+
 # === Datos generados / planillas personales: NUNCA al repo (causas reservadas, datos
 # personales, gestion propia). Todos los .xlsx y .csv de la carpeta son datos. ===
 *.xlsx

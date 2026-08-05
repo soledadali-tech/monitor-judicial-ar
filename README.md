@@ -50,6 +50,15 @@ En cualquiera de los tres, el programa:
   te lo informa).
 - Adjunta los PDF de despachos y cedulas al email.
 - Guarda automaticamente una copia local de todos los PDF, organizados por fecha.
+- **Detecta audiencias y las deja listas para agendar.** Cuando una novedad menciona
+  "audiencia" o "vista de causa" (PJN y MEV; ver `lib/agenda-audiencias.mjs`), el bot
+  busca la fecha y hora en el texto del despacho (PDF en PJN, proveido en MEV) y, si la
+  encuentra, arma un bloque "AUDIENCIAS DETECTADAS" al principio del mail con un archivo
+  `.ics` adjunto por cada una (se suma con un clic a Google Calendar/Outlook/Apple
+  Calendar). Es **best-effort y orientativo**: siempre incluye el fragmento de texto de
+  donde salio la fecha para verificar de un vistazo, y nunca reemplaza confirmar en el
+  portal. Si detecta la palabra pero no puede leer la fecha con confianza, igual avisa
+  en PRIORITARIAS para que se revise a mano.
 
 **2) Control de plazos (orientativo).**
 
@@ -189,6 +198,22 @@ diario lo hace el sistema operativo, y eso es lo que este asistente configura. P
 borrarlas: en Windows, "Programador de tareas" (o `schtasks /Query /TN ParteDiarioMEV`); en
 Mac/Linux, `crontab -l`.
 
+### Alternativa: `daemon.mjs` (scheduler propio, configurable por `.env`)
+
+Si preferis no tocar crontab/Programador de tareas (tipico en un VPS con systemd), `node
+daemon.mjs` hace lo mismo desde un unico proceso de larga duracion, leyendo los horarios
+directo del `.env`:
+
+    CRON_PJN=08:00,18:00
+    CRON_MEV=08:30
+    CRON_EJE=09:00
+
+Ventaja sobre cron: calcula todo en hora de Argentina (UTC-3 fijo) sin depender del
+timezone del sistema operativo — el mismo dolor de cabeza que `DESPLIEGUE-VPS.md`
+resuelve a mano para crontab. Si una corrida sigue colgada cuando le toca disparar de
+nuevo, la saltea (no la pisa). Para dejarlo corriendo solo en el VPS, ver la seccion de
+`systemd` en `DESPLIEGUE-VPS.md`.
+
 ---
 
 ## Control de plazos - como funciona
@@ -216,6 +241,29 @@ deduce de la caratula (con marca `[auto]`), pero SOLO si la celda esta vacia: si
 cargaste, las respeta. Igual con "Fecha Impulso Real", "Fecha Hecho" y "Ultima Interrupcion":
 lo que cargas vos nunca se pisa, y tiene prioridad sobre lo que deduce el bot. El `[auto]` te
 avisa que ese dato lo puso el sistema para que lo confirmes.
+
+---
+
+## Planilla "LISTADO JUICIOS": actor, demandado, materia y firma
+
+Ademas de lo que descubre solo (feed del PJN, barrido de la MEV), el bot lee una
+planilla de Google Sheets con la cartera "oficial" del estudio (quien es el actor, el
+demandado, la materia y quien firma cada causa). Se configura una sola vez (ver
+`PLANILLA_SHEET_ID`/`PLANILLA_GIDS` en `.env.example`) y despues corre solo: cada
+parte diario y cada siembra (`sembrar-causas.mjs`, `descubrir-mev.mjs`) la vuelve a leer,
+asi que un cambio en la planilla se refleja en la proxima corrida sin tocar nada mas.
+
+En `cartera-pjn.xlsx` y `cartera-mev.xlsx` esto se ve en columnas nuevas: **Actor**,
+**Demandado**, **Materia**, **Firma** (el bot las completa solo si estan vacias; lo que
+cargues a mano nunca se pisa) y **En Planilla** (`SI` si la fila matcheo con una fila de
+la planilla). Las causas que la planilla conoce pero el bot todavia no encontro en el
+portal se agregan como fila nueva, sin inventar fechas de movimiento (en la MEV quedan
+con `Vigilar=NO` hasta que aparezcan de verdad tras sembrar/autorizar). Si una causa de
+la planilla podria corresponder a mas de una fila de la cartera, el bot no completa nada:
+lo deja para revision manual y lo avisa en el log ("Planilla -> cartera: N ambigua(s)").
+
+La planilla tiene que estar compartida como "cualquiera con el enlace puede ver"; se lee
+por el endpoint publico de exportacion CSV, sin login ni API key.
 
 ---
 
