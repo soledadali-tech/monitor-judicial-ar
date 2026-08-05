@@ -13,6 +13,8 @@
  *   CRON_PJN=08:00,18:00
  *   CRON_MEV=08:30
  *   CRON_EJE=09:00
+ *   CRON_AGENDA=18:00        (agenda de audiencias semanal)
+ *   CRON_AGENDA_DIA=miercoles (opcional: solo ese dia; sin esto dispararia TODOS los dias)
  * Formato HH:MM (24hs), varios horarios separados por coma.
  *
  * Uso:  node daemon.mjs          (foreground; Ctrl+C para salir)
@@ -46,6 +48,7 @@ const FRENTES = {
   pjn: { script: "parte-diario-pjn.mjs", env: "CRON_PJN", logFile: "parte-pjn.log" },
   eje: { script: "parte-diario-eje.mjs", env: "CRON_EJE", logFile: "parte-eje.log" },
   mev: { script: "parte-diario-mev.mjs", env: "CRON_MEV", logFile: "parte-mev.log" },
+  agenda: { script: "agenda-audiencias-semanal.mjs", env: "CRON_AGENDA", diaEnv: "CRON_AGENDA_DIA", logFile: "agenda.log" },
 };
 
 function horasDe(envVar) {
@@ -60,13 +63,26 @@ function horasDe(envVar) {
   return out;
 }
 
+const DIAS_SEMANA = { domingo: 0, lunes: 1, martes: 2, miercoles: 3, "miércoles": 3, jueves: 4, viernes: 5, sabado: 6, "sábado": 6 };
+function diaSemanaDe(envVar) {
+  const raw = (process.env[envVar] || "").trim().toLowerCase();
+  if (!raw) return null; // sin dia especifico: dispara todos los dias
+  if (!(raw in DIAS_SEMANA)) { log(`ADVERTENCIA: dia invalido en ${envVar}="${raw}" (lunes..domingo). Se ignora, dispara todos los dias.`); return null; }
+  return DIAS_SEMANA[raw];
+}
+
 // Proximo instante (Date, UTC internamente) que corresponde a esa hora:minuto en
-// horario de Argentina (UTC-3 fijo). No depende del TZ del proceso/SO.
-function proximaFechaAR(hora) {
+// horario de Argentina (UTC-3 fijo), opcionalmente restringido a un dia de la semana
+// especifico (0=domingo..6=sabado). No depende del TZ del proceso/SO.
+function proximaFechaAR(hora, diaSemana = null) {
   const ahora = Date.now();
   const inicioDiaUTC = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate());
   let candidato = inicioDiaUTC + (hora.h + 3) * 3600000 + hora.m * 60000;
   while (candidato <= ahora) candidato += 24 * 3600000;
+  if (diaSemana != null) {
+    // El "dia" en hora de Argentina es el de (candidato - 3hs).
+    while (new Date(candidato - 3 * 3600000).getUTCDay() !== diaSemana) candidato += 24 * 3600000;
+  }
   return new Date(candidato);
 }
 
@@ -93,11 +109,12 @@ function correr(frente) {
   });
 }
 
-function programar(frente, hora) {
-  const proxima = proximaFechaAR(hora);
+function programar(frente, hora, diaSemana) {
+  const proxima = proximaFechaAR(hora, diaSemana);
   const ms = proxima.getTime() - Date.now();
-  setTimeout(() => { correr(frente); programar(frente, hora); }, ms);
-  log(`[AGENDADO] ${frente.script} @ ${hora.txt} AR -> proxima corrida en ${Math.round(ms / 60000)} min (${proxima.toISOString()})`);
+  setTimeout(() => { correr(frente); programar(frente, hora, diaSemana); }, ms);
+  const diaTxt = diaSemana != null ? ` (${Object.keys(DIAS_SEMANA).find((k) => DIAS_SEMANA[k] === diaSemana && k.length > 5) || diaSemana}s)` : "";
+  log(`[AGENDADO] ${frente.script} @ ${hora.txt} AR${diaTxt} -> proxima corrida en ${Math.round(ms / 60000)} min (${proxima.toISOString()})`);
 }
 
 function main() {
@@ -106,7 +123,8 @@ function main() {
   for (const frente of Object.values(FRENTES)) {
     const horas = horasDe(frente.env);
     if (!horas.length) { log(`[OMITIDO] ${frente.script}: sin ${frente.env} en .env`); continue; }
-    for (const hora of horas) programar(frente, hora);
+    const diaSemana = frente.diaEnv ? diaSemanaDe(frente.diaEnv) : null;
+    for (const hora of horas) programar(frente, hora, diaSemana);
     algo = true;
   }
   if (!algo) {

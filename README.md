@@ -182,14 +182,47 @@ Detalle del frente y de los computos de plazos: ver `MEV.md`.
 
 ---
 
-## Agendar los partes (PJN / EJE / MEV)
+## Agenda de audiencias semanal
+
+`agenda-audiencias-semanal.mjs` arma la agenda de la semana que viene (lunes a
+viernes), leyendo el calendario "AUDIENCIAS" de Google Calendar. Reemplaza el flujo
+manual (Claude leyendo el calendario y cargando un Google Sheet a mano) por un script
+que corre solo, **sin IA**: la clasificación (tipo, modalidad, lugar, link, asignación
+automática por prioridad, choques de horario) es por reglas fijas, el mismo glosario
+que se usaba a mano.
+
+1. Conseguí la **"Dirección secreta en formato iCal"** del calendario AUDIENCIAS:
+   calendar.google.com (con la cuenta dueña del calendario) → engranaje →
+   Configuración → el calendario "AUDIENCIAS" en la columna izquierda → "Integrar
+   calendario" → esa dirección (**no** la pública: esa da 404 si el calendario no está
+   compartido públicamente).
+2. Pegala en `.env` como `ICAL_AUDIENCIAS_URL=...`.
+3. Probá: `node agenda-audiencias-semanal.mjs`. Vuelca la semana a
+   `agenda-audiencias.xlsx` (una hoja nueva por semana, re-correr la misma semana
+   reemplaza esa hoja) y manda un mail a `MAIL_TO_AGENDA` (o `MAIL_TO` si no la
+   definís) con el resumen día por día, destacando "sin asignar" y "⚠ choques".
+
+**Limitación conocida**: un evento tipo "TRES MEDIACIONES CABA" con varios horarios en
+la descripción queda como una sola fila (no se separa en 3 audiencias); el detalle
+completo sigue disponible en la columna Notas, pero conviene revisarlo a mano.
+
+Reglas de asignación (en este orden — la primera que matchea gana):
+1. Menciona "inmigr" → **Mariel**.
+2. Tribunal de Trabajo (TT, o patrones tipo "T2LZ"/"T 2 AV") → **Soledad**.
+3. Avellaneda o Lanús → **David**.
+4. El resto queda sin asignar, para repartir a mano.
+
+---
+
+## Agendar los partes (PJN / EJE / MEV / Agenda)
 
 Para que los partes salgan solos cada dia, doble clic en `agendar.bat` (Mac/Linux:
 `node agendar.mjs`). Es un asistente que te deja elegir:
 
-- **Que frentes** programar (PJN, EJE, MEV, o los tres).
+- **Que frentes** programar (PJN, EJE, MEV, Agenda, o todos).
 - **Con que frecuencia**: una vez al dia, dos veces (manana y tarde), o los horarios que
-  vos pongas.
+  vos pongas. Si elegis "Agenda" (semanal, no diaria), aparte te pregunta **que dia de
+  la semana** — sin eso se dispararia todos los dias, que no es lo que queres.
 - **A que hora**.
 
 Crea las tareas en el Programador de tareas de Windows (o en cron) apuntando a cada
@@ -207,6 +240,8 @@ directo del `.env`:
     CRON_PJN=08:00,18:00
     CRON_MEV=08:30
     CRON_EJE=09:00
+    CRON_AGENDA=18:00
+    CRON_AGENDA_DIA=miercoles
 
 Ventaja sobre cron: calcula todo en hora de Argentina (UTC-3 fijo) sin depender del
 timezone del sistema operativo — el mismo dolor de cabeza que `DESPLIEGUE-VPS.md`

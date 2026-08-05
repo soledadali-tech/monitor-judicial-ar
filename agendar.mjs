@@ -20,11 +20,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WIN = process.platform === "win32";
 
 // Frentes disponibles: script del parte, base del runner, nombre de tarea, log.
+// "semanal" = se dispara UN dia por semana (pide dia aparte), no todos los dias.
 const FRENTES = {
   pjn: { script: "parte-diario-pjn.mjs", runnerBase: "run-parte-pjn", tarea: "ParteDiarioPJN", log: "parte-pjn.log", nombre: "PJN (Nacion)" },
   eje: { script: "parte-diario-eje.mjs", runnerBase: "run-parte-eje", tarea: "ParteDiarioEJE", log: "parte-eje.log", nombre: "EJE (CABA / JusCABA)" },
   mev: { script: "parte-diario-mev.mjs", runnerBase: "run-parte-mev", tarea: "ParteDiarioMEV", log: "parte-mev.log", nombre: "MEV (Provincia de Buenos Aires / SCBA)" },
+  agenda: { script: "agenda-audiencias-semanal.mjs", runnerBase: "run-agenda-audiencias", tarea: "AgendaAudiencias", log: "agenda.log", nombre: "Agenda de audiencias semanal", semanal: true },
 };
+
+const DIAS_CRON = { domingo: 0, lunes: 1, martes: 2, miercoles: 3, jueves: 4, viernes: 5, sabado: 6 };
+const DIAS_WIN = { domingo: "SUN", lunes: "MON", martes: "TUE", miercoles: "WED", jueves: "THU", viernes: "FRI", sabado: "SAT" };
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 const ask = (q, def = "") => new Promise((res) =>
@@ -48,15 +53,18 @@ function asegurarRunner(f) {
   return runnerPath;
 }
 
-function crearTareaWin(nombreTarea, hora, runnerPath) {
+function crearTareaWin(nombreTarea, hora, runnerPath, diaSemana) {
   // Comando unico (no array) para evitar DEP0190 con shell:true.
-  const cmd = `schtasks /Create /SC DAILY /ST ${hora} /TN "${nombreTarea}" /TR "${runnerPath}" /F`;
+  const cmd = diaSemana
+    ? `schtasks /Create /SC WEEKLY /D ${DIAS_WIN[diaSemana]} /ST ${hora} /TN "${nombreTarea}" /TR "${runnerPath}" /F`
+    : `schtasks /Create /SC DAILY /ST ${hora} /TN "${nombreTarea}" /TR "${runnerPath}" /F`;
   const r = spawnSync(cmd, { shell: true, stdio: "pipe", encoding: "utf8" });
   return { ok: r.status === 0, out: (r.stdout || "") + (r.stderr || "") };
 }
-function crearTareaCron(hora, runnerPath) {
+function crearTareaCron(hora, runnerPath, diaSemana) {
   const [h, m] = hora.split(":");
-  const cronLine = `${Number(m)} ${Number(h)} * * * "${runnerPath}"`;
+  const dow = diaSemana != null ? DIAS_CRON[diaSemana] : "*";
+  const cronLine = `${Number(m)} ${Number(h)} * * ${dow} "${runnerPath}"`;
   const r = spawnSync("sh", ["-c", `(crontab -l 2>/dev/null | grep -v -F "${runnerPath} #agendar"; echo '${cronLine} #agendar') | crontab -`], { stdio: "pipe", encoding: "utf8" });
   return { ok: r.status === 0, cronLine, out: (r.stdout || "") + (r.stderr || "") };
 }
@@ -67,12 +75,21 @@ async function main() {
   console.log("Requisito: cada frente ya tiene que estar configurado en el .env.\n");
 
   // 1) Que frentes.
-  console.log("Frentes: pjn, eje, mev");
+  console.log("Frentes: pjn, eje, mev, agenda (agenda de audiencias semanal)");
   const sel = (await ask("Cuales agendar (coma, o 'todos')", "todos")).toLowerCase();
   const claves = sel === "todos" || sel === "todo"
     ? Object.keys(FRENTES)
     : sel.split(/[,\s]+/).map((s) => s.trim()).filter((s) => FRENTES[s]);
   if (!claves.length) { console.log("No elegiste ningun frente valido. Salgo."); rl.close(); return; }
+
+  // Frentes semanales (agenda de audiencias): piden UN dia de la semana, no todos.
+  const semanales = claves.filter((k) => FRENTES[k].semanal);
+  let diaSemanal = null;
+  if (semanales.length) {
+    console.log(`\n${semanales.map((k) => FRENTES[k].nombre).join(", ")}: se dispara UN dia por semana (no todos los dias).`);
+    diaSemanal = (await ask("Que dia (lunes..domingo)", "miercoles")).toLowerCase();
+    if (!DIAS_CRON.hasOwnProperty(diaSemanal)) { console.log(`Dia invalido: "${diaSemanal}". Uso miercoles.`); diaSemanal = "miercoles"; }
+  }
 
   // 2) Frecuencia + horarios (iguales para todos los frentes elegidos).
   console.log("\nFrecuencia:");
@@ -96,8 +113,8 @@ async function main() {
   horas = [...new Set(horas)];
 
   // 3) Resumen y confirmacion.
-  console.log("\nVoy a crear estas tareas diarias:");
-  for (const k of claves) for (const h of horas) console.log(`  - ${FRENTES[k].nombre}  ->  ${h}`);
+  console.log("\nVoy a crear estas tareas:");
+  for (const k of claves) for (const h of horas) console.log(`  - ${FRENTES[k].nombre}  ->  ${FRENTES[k].semanal ? `${diaSemanal} ` : "todos los dias "}${h}`);
   const ok = (await ask("\nConfirmas? (s/n)", "s")).toLowerCase().startsWith("s");
   if (!ok) { console.log("Cancelado. No se creo ninguna tarea."); rl.close(); return; }
 
@@ -107,14 +124,15 @@ async function main() {
   for (const k of claves) {
     const f = FRENTES[k];
     const runnerPath = asegurarRunner(f);
+    const dia = f.semanal ? diaSemanal : null;
     for (const h of horas) {
       const nombreTarea = horas.length > 1 ? `${f.tarea}_${hhmm(h)}` : f.tarea;
       if (WIN) {
-        const r = crearTareaWin(nombreTarea, h, runnerPath);
+        const r = crearTareaWin(nombreTarea, h, runnerPath, dia);
         if (r.ok) { creadas++; console.log(`  OK  ${nombreTarea} @ ${h}`); }
         else { fallidas++; console.log(`  FALLO  ${nombreTarea} @ ${h}: ${r.out.trim().split("\n").pop()}`); }
       } else {
-        const r = crearTareaCron(h, runnerPath);
+        const r = crearTareaCron(h, runnerPath, dia);
         if (r.ok) { creadas++; console.log(`  OK  cron ${r.cronLine}`); }
         else { fallidas++; console.log(`  FALLO cron @ ${h}: ${r.out.trim()}`); }
       }
