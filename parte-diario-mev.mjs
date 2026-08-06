@@ -461,9 +461,13 @@ async function main() {
         const fechaISO = m ? `${m[3].length === 2 ? "20" + m[3] : m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}` : new Date().toISOString().slice(0, 10);
         const descripcion = String(n.paso.descripcion || "Novedad").slice(0, 300);
         const relevancia = relevanciaDe(n.paso);
+        // proveido: texto completo de la actuacion (ver mas arriba, lib/mev-client.mjs
+        // obtenerProveido) — se sube tal cual para que Claude Cowork pueda escribir el
+        // resumen narrativo de causas MEV sin necesitar acceso al portal (a diferencia
+        // de PJN, la MEV no tiene MCP propio). null si no se pudo leer.
         if (!hoyPorClave.has(k)) hoyPorClave.set(k, { ultima: null, novedades: [] });
         const g = hoyPorClave.get(k);
-        g.novedades.push({ fecha: fechaISO, descripcion, relevancia });
+        g.novedades.push({ fecha: fechaISO, descripcion, relevancia, proveido: n.proveido || null });
         if (!g.ultima || fechaISO >= g.ultima.fecha) g.ultima = { fecha: fechaISO, descripcion };
       }
 
