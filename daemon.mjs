@@ -113,7 +113,7 @@ function programar(frente, hora, diaSemana) {
   const proxima = proximaFechaAR(hora, diaSemana);
   const ms = proxima.getTime() - Date.now();
   setTimeout(() => { correr(frente); programar(frente, hora, diaSemana); }, ms);
-  const diaTxt = diaSemana != null ? ` (${Object.keys(DIAS_SEMANA).find((k) => DIAS_SEMANA[k] === diaSemana && k.length > 5) || diaSemana}s)` : "";
+  const diaTxt = diaSemana != null ? ` (los ${Object.keys(DIAS_SEMANA).find((k) => DIAS_SEMANA[k] === diaSemana && k.length > 5) || diaSemana})` : "";
   log(`[AGENDADO] ${frente.script} @ ${hora.txt} AR${diaTxt} -> proxima corrida en ${Math.round(ms / 60000)} min (${proxima.toISOString()})`);
 }
 
