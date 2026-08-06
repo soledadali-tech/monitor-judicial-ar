@@ -349,10 +349,12 @@ async function main() {
     log(`Busqueda activa por planilla omitida: ${e.message}`);
   }
 
-  // 2) Causas a vigilar.
-  const { causas: vigiladas, nota } = await leerVigiladas();
+  // 2) Causas a vigilar (solo las que matchean con la planilla LISTADO JUICIOS,
+  //    ver nota en leerVigiladas: filtra causas ajenas que puedan colarse por el
+  //    set compartido "Lista de Causas con AUTORIZACION" del portal MEV).
+  const { causas: vigiladas, nota, descartadasSinPlanilla } = await leerVigiladas();
   if (nota) log(`Cartera MEV: ${nota}`);
-  log(`Causas vigiladas: ${vigiladas.length}`);
+  log(`Causas vigiladas: ${vigiladas.length}${descartadasSinPlanilla ? ` (+ ${descartadasSinPlanilla} descartada(s) por no estar en la planilla)` : ""}`);
   if (!vigiladas.length) {
     log("No hay causas vigiladas. Pedir autorizaciones en la MEV o armar sets, y correr descubrir-mev.mjs.");
     if (CFG.enviarSinNovedades) await enviar(armarParte([], "sin causas vigiladas", 0, [], null, null, [], pendientesPlanilla), 0, 0, 0);
