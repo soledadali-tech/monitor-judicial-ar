@@ -29,7 +29,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import nodemailer from "nodemailer";
 import { entrarJurisdiccion, causasDeSet, pasosNuevos, obtenerProveido, parseDia, PAUSA } from "./lib/mev-client.mjs";
-import { hayCredenciales } from "./lib/mev-auth.mjs";
+import { hayCredenciales, diasHastaVencimientoClave } from "./lib/mev-auth.mjs";
 import { upsertCausas, leerVigiladas, volcarCalculos } from "./lib/cartera-mev.mjs";
 import { estadoPrevio, registrarPasos } from "./lib/movimientos-mev.mjs";
 import { calcularCaducidadMev, renderCaducidadMev } from "./lib/caducidad-mev.mjs";
@@ -69,6 +69,7 @@ const CFG = {
   pausaMs: Number(process.env.MEV_PAUSA_MS || PAUSA),
   alertaFalla: (process.env.ALERTA_FALLA || "true") !== "false",
   alertaLocalDir: process.env.ALERTA_LOCAL_DIR || __dirname,
+  avisoClaveDias: Number(process.env.MEV_AVISO_VENCIMIENTO_DIAS || 10),
 };
 
 // "Moron:penal;San Isidro" -> [{clave, depto, penal, familia}]
@@ -149,7 +150,7 @@ function crearTransport() {
   });
 }
 
-function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescripcion, agenda = [], pendientesPlanilla = { noEncontradas: [], ambiguas: [] }) {
+function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescripcion, agenda = [], pendientesPlanilla = { noEncontradas: [], ambiguas: [] }, avisoClaveDias = null) {
   const porCausa = new Map();
   for (const n of novedades) {
     const k = n.causa.key;
@@ -167,6 +168,19 @@ function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescr
 
   let texto = `Parte diario MEV - SCBA (Provincia de Buenos Aires) - ${fecha}\nVentana: ${ventanaDesc}. ${novedades.length} novedad(es) en ${porCausa.size} causa(s). Vigiladas: ${vigiladas}.\n\n`;
   let html = `<h2>Parte diario MEV - SCBA (Provincia de Buenos Aires)</h2><p><b>${fecha}</b><br>Ventana: ${ventanaDesc}. ${novedades.length} novedad(es) en ${porCausa.size} causa(s). Causas vigiladas: ${vigiladas}.</p>`;
+
+  // Aviso anticipado de vencimiento de la clave MEV (politica 90 dias) — ver
+  // lib/mev-auth.mjs diasHastaVencimientoClave(). Solo se calcula si la usuaria
+  // cargo MEV_CLAVE_CAMBIADA en .env; sin eso, la unica deteccion es reactiva
+  // (recien cuando el login la rechaza).
+  if (avisoClaveDias != null) {
+    const vencida = avisoClaveDias < 0;
+    const msg = vencida
+      ? `La clave MEV pasó los 90 días desde el último cambio (hace ${-avisoClaveDias} día(s) de más) — puede estar vencida. Si los próximos partes no llegan, renovarla en mev.scba.gov.ar y actualizar MEV_CLAVE + MEV_CLAVE_CAMBIADA en .env.`
+      : `La clave MEV vence en ${avisoClaveDias} día(s) (política de cambio cada 90 días). Renovarla en mev.scba.gov.ar antes de esa fecha y actualizar MEV_CLAVE + MEV_CLAVE_CAMBIADA en .env, para que no se corte el parte diario.`;
+    texto += `>>> AVISO: ${msg} <<<\n\n`;
+    html += `<div style="border:2px solid #b58900;border-radius:4px;padding:8px 10px;margin:10px 0;background:#fdf6e3"><b style="color:#b58900">⚠ Clave MEV ${vencida ? "posiblemente vencida" : "por vencer"}</b><br>${msg}</div>`;
+  }
 
   if (prioritarias.length) {
     texto += `>>> PRIORITARIAS (${prioritarias.length}) - revisar primero <<<\n`;
@@ -294,6 +308,12 @@ async function main() {
   if (!hayCredenciales()) throw new Error("Faltan MEV_USUARIO/MEV_CLAVE en .env (la MEV no tiene consulta anonima)");
   if (!JURS.length && !AUTO_MEV) throw new Error("Falta MEV_JURISDICCIONES en .env (ej: Moron:penal;San Isidro, o 'auto')");
 
+  // Aviso anticipado de vencimiento de clave (ver lib/mev-auth.mjs): solo se
+  // muestra en el mail si esta dentro del umbral configurado (o ya vencida).
+  const diasClave = diasHastaVencimientoClave();
+  const avisoClaveDias = diasClave != null && diasClave <= CFG.avisoClaveDias ? diasClave : null;
+  if (avisoClaveDias != null) log(`Aviso: clave MEV ${avisoClaveDias < 0 ? "posiblemente vencida" : `vence en ${avisoClaveDias} dia(s)`}.`);
+
   // 1) Siembra: por cada jurisdiccion, recorrer TODOS los sets (incluye el set
   //    automatico "Lista de Causas con AUTORIZACION") y volcar a cartera-mev.xlsx.
   //    En modo auto se omite: se usa la cartera ya sembrada por descubrir-mev.mjs.
@@ -363,7 +383,7 @@ async function main() {
   log(`Causas vigiladas: ${vigiladas.length}${descartadasSinPlanilla ? ` (+ ${descartadasSinPlanilla} descartada(s) por no estar en la planilla)` : ""}`);
   if (!vigiladas.length) {
     log("No hay causas vigiladas. Pedir autorizaciones en la MEV o armar sets, y correr descubrir-mev.mjs.");
-    if (CFG.enviarSinNovedades) await enviar(armarParte([], "sin causas vigiladas", 0, [], null, null, [], pendientesPlanilla), 0, 0, 0);
+    if (CFG.enviarSinNovedades) await enviar(armarParte([], "sin causas vigiladas", 0, [], null, null, [], pendientesPlanilla, avisoClaveDias), 0, 0, 0);
     registrarCorrida("0 vigiladas");
     return;
   }
@@ -549,7 +569,7 @@ async function main() {
     else log(`Plazos volcados a cartera-mev: ${vc.escritas} fila(s) con computo.`);
   } catch (e) { log(`Volcado de plazos MEV omitido: ${e.message}`); }
 
-  const parte = armarParte(novedades, desc, vigiladas.length, fallos, caducidadRender, prescripcionRender, agenda, pendientesPlanilla);
+  const parte = armarParte(novedades, desc, vigiladas.length, fallos, caducidadRender, prescripcionRender, agenda, pendientesPlanilla, avisoClaveDias);
   await enviar(parte, novedades.length, parte.causas, parte.prioritarias, parte.caducidadRevision, parte.prescripcionAlerta, adjuntosAgenda);
 
   // Registrar despues del mail (si el mail falla, no se marca visto y se reintenta).

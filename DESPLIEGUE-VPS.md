@@ -228,4 +228,32 @@ Chequeá tambien el mail de la cuenta Oracle: avisan ahi antes de detener.
 - La clave del PJN vence/cambia: actualizar `.env` y rehacer el paso 6 si hace falta.
 - `git pull` para actualizar el bot; `npm install` solo si cambio package.json
   (siempre con PUPPETEER_SKIP_DOWNLOAD=true en ARM).
-- Logs: `parte-pjn.log` crece; si molesta, rotarlo con logrotate o truncarlo.
+- Logs: `parte-pjn.log`, `parte-mev.log`, `agenda.log`, `backup.log`,
+  `ultima-corrida*.log` crecen sin límite (el daemon los abre en modo append).
+  Ya viene resuelto con `logrotate` (rotación semanal, 8 semanas de historial,
+  comprimidos) — si hay que rehacerlo en una instancia nueva:
+  ```
+  sudo apt-get install -y logrotate   # la imagen "Minimal" no lo trae
+  sudo tee /etc/logrotate.d/monitor-judicial >/dev/null << 'EOF'
+  /home/ubuntu/monitor-judicial-ar/*.log {
+      su ubuntu ubuntu
+      weekly
+      rotate 8
+      compress
+      delaycompress
+      missingok
+      notifempty
+      copytruncate
+      create 0664 ubuntu ubuntu
+  }
+  EOF
+  ```
+  GOTCHA: sin la directiva `su ubuntu ubuntu`, logrotate rechaza rotar con
+  `error: ... parent directory has insecure permissions` porque la carpeta del
+  repo es del usuario `ubuntu` (group-writable), no de `root` — logrotate corre
+  como root por default y no confía en directorios que no controla. `su` le dice
+  que haga la rotación con los permisos de ese usuario en vez de root. Se instala
+  con un timer systemd propio (`logrotate.timer`, corre a las 00:00), no depende
+  de `cron` (que en esta imagen viene inactivo). Verificar con
+  `sudo logrotate -d /etc/logrotate.d/monitor-judicial` (dry-run) o forzar una
+  rotación real de prueba con `sudo logrotate -f /etc/logrotate.d/monitor-judicial`.
