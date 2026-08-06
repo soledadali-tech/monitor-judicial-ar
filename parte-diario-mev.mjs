@@ -154,10 +154,16 @@ function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescr
   for (const n of novedades) {
     const k = n.causa.key;
     if (!porCausa.has(k)) porCausa.set(k, { causa: n.causa, pasos: [] });
-    porCausa.get(k).pasos.push(n.paso);
+    porCausa.get(k).pasos.push({ paso: n.paso, proveido: n.proveido });
   }
   const prioritarias = novedades.filter((n) => esPrioritario(n.paso));
   const fecha = new Intl.DateTimeFormat("es-AR", { timeZone: "America/Argentina/Buenos_Aires", dateStyle: "full" }).format(new Date());
+
+  // Texto completo del proveido de cada novedad (la MEV no sirve PDFs; esto es lo
+  // mas cercano a "adjuntar el documento" — ver lib/mev-busqueda-planilla.mjs para
+  // el resto del contexto de esta corrida). Se muestra siempre que se pudo leer.
+  const textoProveido = (p) => p ? `        proveido: ${String(p).replace(/\n/g, "\n        ")}\n` : "";
+  const htmlProveido = (p) => p ? `<div style="margin:4px 0 8px 0;padding:6px 8px;background:#f7f7f7;border-left:3px solid #ccc;font-size:12px;color:#444;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace">${p}</div>` : "";
 
   let texto = `Parte diario MEV - SCBA (Provincia de Buenos Aires) - ${fecha}\nVentana: ${ventanaDesc}. ${novedades.length} novedad(es) en ${porCausa.size} causa(s). Vigiladas: ${vigiladas}.\n\n`;
   let html = `<h2>Parte diario MEV - SCBA (Provincia de Buenos Aires)</h2><p><b>${fecha}</b><br>Ventana: ${ventanaDesc}. ${novedades.length} novedad(es) en ${porCausa.size} causa(s). Causas vigiladas: ${vigiladas}.</p>`;
@@ -168,8 +174,8 @@ function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescr
     for (const n of prioritarias) {
       const mot = motivoPrioridad(n.paso);
       const neg = RX_NEGATIVA.test(n.paso.descripcion || "") ? " - posible resol. negativa" : "";
-      texto += `  [!] ${n.causa.expedienteRef} - ${n.causa.caratula} - ${n.paso.descripcion} (${n.paso.fechaHora || n.paso.fecha}) [${mot}${neg}]\n`;
-      html += `<li><b>${n.causa.expedienteRef}</b> - ${n.causa.caratula}<br>${n.paso.descripcion} <span style="color:#1e3a8b">(${n.paso.fechaHora || n.paso.fecha} - ${mot})</span>${neg ? `<span style="color:#b58900"> - posible resol. negativa</span>` : ""}</li>`;
+      texto += `  [!] ${n.causa.expedienteRef} - ${n.causa.caratula} - ${n.paso.descripcion} (${n.paso.fechaHora || n.paso.fecha}) [${mot}${neg}]\n${textoProveido(n.proveido)}`;
+      html += `<li><b>${n.causa.expedienteRef}</b> - ${n.causa.caratula}<br>${n.paso.descripcion} <span style="color:#1e3a8b">(${n.paso.fechaHora || n.paso.fecha} - ${mot})</span>${neg ? `<span style="color:#b58900"> - posible resol. negativa</span>` : ""}${htmlProveido(n.proveido)}</li>`;
     }
     texto += "\n"; html += "</ul></div>";
   }
@@ -223,11 +229,11 @@ function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescr
   for (const [, { causa, pasos }] of porCausa) {
     texto += `== ${causa.expedienteRef} (${causa.jurisdiccion || "s/jur"}) ==\n${causa.caratula}${causa.estado ? " [" + causa.estado + "]" : ""}\n`;
     html += `<h3 style="margin:12px 0 2px">${causa.expedienteRef} <span style="opacity:.7;font-size:13px">(${causa.jurisdiccion || "s/jur"})</span></h3><div style="color:#555">${causa.caratula}${causa.estado ? ` <b>[${causa.estado}]</b>` : ""}${causa.organismo ? `<br><span style="font-size:12px">${causa.organismo}</span>` : ""}</div><ul>`;
-    for (const p of pasos) {
+    for (const { paso: p, proveido } of pasos) {
       const prio = esPrioritario(p) ? " [PRIORITARIA]" : "";
       const firm = p.firmado ? " (firmado)" : "";
-      texto += `  - ${p.fechaHora || p.fecha} ${p.descripcion}${prio}${firm}\n`;
-      html += `<li><b>${p.fechaHora || p.fecha}</b> ${p.descripcion}${prio ? ` <span style="color:#1e3a8b">[PRIORITARIA]</span>` : ""}${firm}</li>`;
+      texto += `  - ${p.fechaHora || p.fecha} ${p.descripcion}${prio}${firm}\n${textoProveido(proveido)}`;
+      html += `<li><b>${p.fechaHora || p.fecha}</b> ${p.descripcion}${prio ? ` <span style="color:#1e3a8b">[PRIORITARIA]</span>` : ""}${firm}${htmlProveido(proveido)}</li>`;
     }
     texto += "\n"; html += "</ul>";
   }
@@ -399,15 +405,24 @@ async function main() {
           baseline = ficha.pasos;
           reportables = ficha.pasos.filter((p) => { const f = parseDia(p.fechaHora || p.fecha); return f && f.getTime() >= corteVentana; });
         }
-        for (const p of reportables) novedades.push({ causa: c, paso: p });
+        // Texto completo del proveido de CADA novedad (pedido explicito: la MEV no
+        // sirve PDFs como el PJN/EJE, asi que esto es lo mas cercano a "adjuntar el
+        // documento" que se puede hacer aca). Una consulta extra al portal por paso
+        // nuevo — se reusa el mismo fetch para la deteccion de audiencias, que antes
+        // lo pedia aparte solo para las prioritarias de audiencia/vista de causa.
         for (const p of reportables) {
-          if (!esPrioritario(p) || !/audiencia|vista de causa/i.test(p.descripcion || "")) continue;
+          let proveidoTexto = null;
           try {
+            await sleep(CFG.pausaMs);
             const prov = await obtenerProveido(jur, c.pidJuzgado, c.nidCausa, p.nPosi);
-            const { extraerAudiencia } = await import("./lib/agenda-audiencias.mjs");
-            const audiencia = extraerAudiencia(prov.texto);
-            if (audiencia) agenda.push({ causa: c, paso: p, audiencia });
-          } catch (e) { log(`Audiencia (causa ${c.nidCausa}, paso ${p.nPosi}): no se pudo leer el proveido - ${e.message}`); }
+            proveidoTexto = prov.texto || null;
+            if (esPrioritario(p) && /audiencia|vista de causa/i.test(p.descripcion || "") && proveidoTexto) {
+              const { extraerAudiencia } = await import("./lib/agenda-audiencias.mjs");
+              const audiencia = extraerAudiencia(proveidoTexto);
+              if (audiencia) agenda.push({ causa: c, paso: p, audiencia });
+            }
+          } catch (e) { log(`Proveido (causa ${c.nidCausa}, paso ${p.nPosi}): no se pudo leer - ${e.message}`); }
+          novedades.push({ causa: c, paso: p, proveido: proveidoTexto });
         }
         for (const p of [...reportables, ...baseline]) {
           paraRegistrar.push({
