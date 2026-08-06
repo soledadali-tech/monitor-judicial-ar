@@ -22,8 +22,15 @@ no abras puertos de entrada y tratá `.pjn-profile/` como si fuera una clave mas
    por limites, revisá cuanto A1 ya tenes usado.
    OJO 2: el error "Out of capacity" en A1 es comun en el free tier. Insistir
    en otro Availability Domain u horario, o usar el shape AMD micro (x86, 1 GB,
-   mas justo de RAM pero evita el problema de Chromium ARM del paso 4).
-4. SSH: subi tu clave publica (o generala ahi y guardá la privada).
+   mas justo de RAM pero evita el problema de Chromium ARM del paso 4 — ver
+   "Notas del shape AMD Micro" mas abajo, probado de punta a punta).
+4. SSH: **subi el ARCHIVO `.pub`** ("Upload public key files"), no pegues el
+   texto ("Paste public keys"). Pegar el texto en el textarea del navegador puede
+   corromperlo en silencio (espacios/saltos de linea) y la instancia queda
+   inaccesible sin ningun aviso — el sintoma es "Permission denied (publickey)"
+   contra una clave que jurarias que es la correcta. Si ya te paso, es mas rapido
+   terminar la instancia y crearla de nuevo subiendo el archivo que debuggear cual
+   caracter se corrompio.
 5. Red: NO hace falta abrir ningun puerto de entrada ademas del 22 (SSH). El
    bot solo hace conexiones salientes (PJN + SMTP). Cuanto menos abierto, mejor.
 
@@ -49,6 +56,20 @@ en Oracle viene en UTC. Para que "8:00" sea 8:00 de Argentina:
     sudo apt install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
       libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64
 
+Si la imagen es **"Ubuntu 24.04 Minimal"** (no la imagen normal) le falta bastante
+mas de lo que trae una instalacion base habitual. Probado en vivo (shape AMD
+Micro, ver mas abajo) hicieron falta ADEMAS:
+
+    sudo apt install -y unzip libcairo2 libpango-1.0-0 libpangocairo-1.0-0 \
+      libgdk-pixbuf2.0-0 libgtk-3-0t64 libx11-6 libxcb1 libx11-xcb1 libxss1 \
+      fonts-liberation libappindicator3-1 libnspr4
+
+`unzip` en particular es critico: sin el, `npm install` de Puppeteer falla al
+extraer Chrome con un error confuso ("no zip archiver is available") — y si ya
+fallo una vez, `npm install` de nuevo NO alcanza: hay que borrar el cache a medio
+bajar (`rm -rf ~/.cache/puppeteer`) antes de reintentar, sino se queda con una
+carpeta sin el ejecutable adentro.
+
 ## 4. Chromium en ARM: el paso que rompe a todos
 
 Puppeteer descarga "Chrome for Testing", que en Linux existe SOLO para x64.
@@ -67,7 +88,31 @@ En el `.env` (paso 5) apuntá Puppeteer al binario del sistema:
 
 (verificá la ruta con `which chromium-browser`; en Ubuntu es un shim que lanza
 el snap de Chromium, funciona igual). En una instancia AMD x64 este paso entero
-se omite: Puppeteer baja su propio Chrome.
+se omite: Puppeteer baja su propio Chrome (solo hace falta lo del paso 3).
+
+### Notas del shape AMD Micro (VM.Standard.E2.1.Micro) — probado de punta a punta
+
+Es el otro shape Always Free: x86_64, 1 OCPU, ~1 GB RAM. Evita todo el lio de
+Chromium ARM, pero es chico:
+
+- **Swap obligatorio.** Con 1 GB de RAM, Puppeteer + varios procesos de Chrome
+  se quedan sin memoria. Antes de `npm install`:
+
+      sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+      sudo mkswap /swapfile && sudo swapon /swapfile
+      echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+- **Es mas lento, no esta colgado.** El primer login del SSO (paso 6) puede
+  tardar 3-4 MINUTOS en esta maquina en vez de segundos — antes de asumir que
+  quedo colgado (o que hay un captcha) esperá varios minutos. Confirmalo mirando
+  si el proceso de `chrome` sigue vivo (`ps aux | grep chrome`) y si la memoria
+  no esta en OOM (`free -h`), no lo mates antes de tiempo.
+- **Los comandos SSH largos, con `nohup`.** `apt upgrade` (por el kernel nuevo)
+  y el primer login del SSO tardan varios minutos, y en el medio `apt upgrade`
+  reinicia `sshd` al actualizarlo — corta la conexion en curso (normal,
+  reconectate y seguí). Para no perder un proceso a mitad de camino, lanzalo
+  con `nohup comando > log 2>&1 < /dev/null & disown` y anda revisando el log
+  con conexiones SSH nuevas en vez de dejar la sesion original abierta.
 
 ## 5. Clonar y configurar
 
