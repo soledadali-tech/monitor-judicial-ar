@@ -34,6 +34,7 @@ import { upsertCausas, leerVigiladas, volcarCalculos } from "./lib/cartera-mev.m
 import { estadoPrevio, registrarPasos } from "./lib/movimientos-mev.mjs";
 import { calcularCaducidadMev, renderCaducidadMev } from "./lib/caducidad-mev.mjs";
 import { calcularPrescripcionMev, renderPrescripcionMev } from "./lib/prescripcion-penal-mev.mjs";
+import { buscarPlanillaEnPortal } from "./lib/mev-busqueda-planilla.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -148,7 +149,7 @@ function crearTransport() {
   });
 }
 
-function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescripcion, agenda = []) {
+function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescripcion, agenda = [], pendientesPlanilla = { noEncontradas: [], ambiguas: [] }) {
   const porCausa = new Map();
   for (const n of novedades) {
     const k = n.causa.key;
@@ -201,6 +202,22 @@ function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescr
     html += `<div style="border:1px solid #b58900;border-radius:4px;padding:6px 10px;margin:10px 0;background:#fdf6e3"><b style="color:#b58900">No se pudieron consultar (${fallos.length})</b>${posibleCaida ? ` &mdash; <b>posible caida general de la MEV</b> (o clave vencida, cambio forzado cada 90 dias). Si la SCBA declara inhabil, cargarlo en feria-pba.json` : ""}<ul style="margin:6px 0">`;
     for (const f of fallos) html += `<li>${f.ref}: ${f.motivo}</li>`;
     html += "</ul></div>";
+  }
+
+  const { noEncontradas: pNoEncontradas = [], ambiguas: pAmbiguas = [] } = pendientesPlanilla || {};
+  if (pNoEncontradas.length || pAmbiguas.length) {
+    const total = pNoEncontradas.length + pAmbiguas.length;
+    texto += `>>> CAUSAS DE LA PLANILLA SIN CONFIRMAR EN LA MEV (${total}) - revisar a mano <<<\n`;
+    html += `<div style="border:1px solid #888;border-radius:4px;padding:6px 10px;margin:10px 0;background:#f5f5f5"><b style="color:#555">Causas de la planilla sin confirmar en la MEV (${total})</b><ul style="margin:6px 0">`;
+    for (const f of pNoEncontradas) {
+      texto += `  [Sin encontrar] ${f.actor} c/ ${f.demandado} (${f.materia}) - ${f.depto} ${f.fuero} Nro ${f.tribunal} - planilla Nro ${f.numeroPlanilla} - motivo: ${f.motivo}\n`;
+      html += `<li><b>Sin encontrar</b>: ${f.actor} c/ ${f.demandado} (${f.materia}) &mdash; ${f.depto}, ${f.fuero} Nro ${f.tribunal}, planilla Nro ${f.numeroPlanilla}<br><span style="font-size:12px;color:#777">${f.motivo}</span></li>`;
+    }
+    for (const f of pAmbiguas) {
+      texto += `  [Ambigua] ${f.actor} c/ ${f.demandado} (${f.materia}) - ${f.depto} ${f.fuero} Nro ${f.tribunal} - planilla Nro ${f.numeroPlanilla} - ${f.candidatos} candidatos por caratula\n`;
+      html += `<li><b>Ambigua</b>: ${f.actor} c/ ${f.demandado} (${f.materia}) &mdash; ${f.depto}, ${f.fuero} Nro ${f.tribunal}, planilla Nro ${f.numeroPlanilla}<br><span style="font-size:12px;color:#777">${f.candidatos} candidatos por caratula, ninguno inequivoco</span></li>`;
+    }
+    texto += "\n"; html += "</ul></div>";
   }
 
   for (const [, { causa, pasos }] of porCausa) {
@@ -299,6 +316,10 @@ async function main() {
   //      que la planilla conoce y todavia no aparecieron en el portal. No toca el portal
   //      (fetch aparte a Google Sheets + lectura/escritura de cartera-mev.xlsx), asi que
   //      corre siempre, incluso en modo AUTO_MEV donde no hay re-siembra.
+  // pendientesPlanilla: causas que la planilla conoce pero el bot todavia no pudo
+  // confirmar en el portal MEV (sin encontrar / ambiguas) — se reportan en el mail
+  // como una seccion aparte (ver armarParte) para que se revisen a mano.
+  const pendientesPlanilla = { noEncontradas: [], ambiguas: [] };
   try {
     const { obtenerPlanilla } = await import("./lib/planilla-causas.mjs");
     const { aplicarPlanilla } = await import("./lib/cartera-mev.mjs");
@@ -314,13 +335,27 @@ async function main() {
     log(`Cruce con planilla omitido: ${e.message}`);
   }
 
+  // 1.6) Busqueda activa en el portal (numero, con respaldo por actor+demandado) de
+  //      las causas que la planilla conoce y el barrido de sets autorizados no
+  //      encontro. Escribe en cartera-mev.xlsx lo que resuelve; lo que no, va al mail.
+  try {
+    const rb = await buscarPlanillaEnPortal({ log });
+    if (rb.encontradas || rb.sinOrganismo || rb.noEncontradas.length || rb.ambiguas.length) {
+      log(`Busqueda activa: ${rb.encontradas} encontrada(s), ${rb.sinOrganismo} sin organismo resuelto, ${rb.noEncontradas.length} sin match, ${rb.ambiguas.length} ambigua(s).`);
+    }
+    pendientesPlanilla.noEncontradas = rb.noEncontradas;
+    pendientesPlanilla.ambiguas = rb.ambiguas;
+  } catch (e) {
+    log(`Busqueda activa por planilla omitida: ${e.message}`);
+  }
+
   // 2) Causas a vigilar.
   const { causas: vigiladas, nota } = await leerVigiladas();
   if (nota) log(`Cartera MEV: ${nota}`);
   log(`Causas vigiladas: ${vigiladas.length}`);
   if (!vigiladas.length) {
     log("No hay causas vigiladas. Pedir autorizaciones en la MEV o armar sets, y correr descubrir-mev.mjs.");
-    if (CFG.enviarSinNovedades) await enviar(armarParte([], "sin causas vigiladas", 0, [], null), 0, 0, 0);
+    if (CFG.enviarSinNovedades) await enviar(armarParte([], "sin causas vigiladas", 0, [], null, null, [], pendientesPlanilla), 0, 0, 0);
     registrarCorrida("0 vigiladas");
     return;
   }
@@ -438,7 +473,8 @@ async function main() {
     log(`Sync a Supabase omitido: ${e.message}`);
   }
 
-  if (novedades.length === 0 && !fallos.length && !CFG.enviarSinNovedades) {
+  const hayPendientesPlanilla = pendientesPlanilla.noEncontradas.length > 0 || pendientesPlanilla.ambiguas.length > 0;
+  if (novedades.length === 0 && !fallos.length && !hayPendientesPlanilla && !CFG.enviarSinNovedades) {
     log("Sin novedades y ENVIAR_SIN_NOVEDADES=false: no se envia correo.");
     await registrarPasos(paraRegistrar);
     registrarCorrida("0 novedades, sin envio");
@@ -492,7 +528,7 @@ async function main() {
     else log(`Plazos volcados a cartera-mev: ${vc.escritas} fila(s) con computo.`);
   } catch (e) { log(`Volcado de plazos MEV omitido: ${e.message}`); }
 
-  const parte = armarParte(novedades, desc, vigiladas.length, fallos, caducidadRender, prescripcionRender, agenda);
+  const parte = armarParte(novedades, desc, vigiladas.length, fallos, caducidadRender, prescripcionRender, agenda, pendientesPlanilla);
   await enviar(parte, novedades.length, parte.causas, parte.prioritarias, parte.caducidadRevision, parte.prescripcionAlerta, adjuntosAgenda);
 
   // Registrar despues del mail (si el mail falla, no se marca visto y se reintenta).
