@@ -15,6 +15,8 @@
  *   CRON_EJE=09:00
  *   CRON_AGENDA=18:00        (agenda de audiencias semanal)
  *   CRON_AGENDA_DIA=miercoles (opcional: solo ese dia; sin esto dispararia TODOS los dias)
+ *   CRON_BACKUP=20:00        (backup semanal de cartera/movimientos por mail)
+ *   CRON_BACKUP_DIA=domingo  (opcional: solo ese dia; sin esto dispararia TODOS los dias)
  * Formato HH:MM (24hs), varios horarios separados por coma.
  *
  * Uso:  node daemon.mjs          (foreground; Ctrl+C para salir)
@@ -44,11 +46,68 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
+// ─── alerta si el daemon mismo se cae ──────────────────────────────────────────
+// systemd lo reinicia solo (Restart=always), pero sin esto nadie se entera de que
+// paso — el proceso vuelve a arrancar en silencio y las corridas que se perdieron
+// entre la caida y el reinicio no dejan rastro. OJO: esto NO cubre el caso de que
+// el VPS entero este caido/sin red (ahi no hay nada corriendo que pueda avisar) —
+// para eso, el mail semanal de backup-datos.mjs funciona como heartbeat indirecto
+// (si deja de llegar, algo esta mal). Nodemailer directo, sin depender de los
+// scripts hijos (que ya tienen su propia alerta de falla, pero solo cubre errores
+// DENTRO de su propio main(), no un crash del daemon que los agenda).
+let mandandoAlerta = false;
+async function alertaCritica(motivo, detalle) {
+  if (mandandoAlerta) return; // no encadenar alertas si la alerta misma tira error
+  mandandoAlerta = true;
+  try {
+    const smtpUser = process.env.SMTP_USER, smtpPass = process.env.SMTP_PASS;
+    const mailTo = process.env.MAIL_TO_ALERTA || process.env.MAIL_TO;
+    if (!smtpUser || !smtpPass || !mailTo) { log("No se pudo mandar alerta critica: faltan SMTP_USER/SMTP_PASS/MAIL_TO."); return; }
+    const nodemailer = (await import("nodemailer")).default;
+    const t = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || "smtp.gmail.com", port: Number(process.env.SMTP_PORT || 465),
+      secure: Number(process.env.SMTP_PORT || 465) === 465, auth: { user: smtpUser, pass: smtpPass },
+      connectionTimeout: 15000, greetingTimeout: 15000, socketTimeout: 20000,
+    });
+    await t.sendMail({
+      from: process.env.MAIL_FROM || smtpUser, to: mailTo,
+      subject: `[ALERTA CRITICA] daemon.mjs se cayo - ${motivo}`,
+      text: [
+        `El daemon de monitor-judicial-ar tuvo un error fatal y va a reiniciarse solo`,
+        `(systemd Restart=always), pero las corridas agendadas para este momento se`,
+        `pueden haber perdido.`,
+        ``,
+        `Motivo: ${motivo}`,
+        `Detalle: ${detalle}`,
+        ``,
+        `Entrar por SSH al VPS y revisar: sudo systemctl status monitor-judicial`,
+        `                                  sudo journalctl -u monitor-judicial -n 100`,
+      ].join("\n"),
+    });
+    log(`Alerta critica enviada a ${mailTo}.`);
+  } catch (e) {
+    log(`No se pudo mandar la alerta critica: ${e.message}`);
+  } finally {
+    mandandoAlerta = false;
+  }
+}
+process.on("uncaughtException", async (e) => {
+  log(`[FATAL] uncaughtException: ${e && e.stack || e}`);
+  await alertaCritica("uncaughtException", (e && e.stack) || String(e));
+  process.exit(1);
+});
+process.on("unhandledRejection", async (e) => {
+  log(`[FATAL] unhandledRejection: ${e && e.stack || e}`);
+  await alertaCritica("unhandledRejection", (e && e.stack) || String(e));
+  process.exit(1);
+});
+
 const FRENTES = {
   pjn: { script: "parte-diario-pjn.mjs", env: "CRON_PJN", logFile: "parte-pjn.log" },
   eje: { script: "parte-diario-eje.mjs", env: "CRON_EJE", logFile: "parte-eje.log" },
   mev: { script: "parte-diario-mev.mjs", env: "CRON_MEV", logFile: "parte-mev.log" },
   agenda: { script: "agenda-audiencias-semanal.mjs", env: "CRON_AGENDA", diaEnv: "CRON_AGENDA_DIA", logFile: "agenda.log" },
+  backup: { script: "backup-datos.mjs", env: "CRON_BACKUP", diaEnv: "CRON_BACKUP_DIA", logFile: "backup.log" },
 };
 
 function horasDe(envVar) {
