@@ -260,14 +260,18 @@ function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescr
   return { texto, html, causas: porCausa.size, prioritarias: prioritarias.length, caducidadRevision: (caducidad && caducidad.revision) || 0, prescripcionAlerta: (prescripcion && prescripcion.alerta) || 0 };
 }
 
-let FALLA_TOTAL = null, FALLA_PARCIAL = null;
+let FALLA_TOTAL = null, FALLA_PARCIAL = null, AVISO_CLAVE = null;
 async function enviar({ texto, html }, novedades, causas, prioritarias, caducidadRevision = 0, prescripcionAlerta = 0, adjuntos = []) {
   const t = crearTransport();
   const fechaCorta = new Intl.DateTimeFormat("es-AR", { timeZone: "America/Argentina/Buenos_Aires", dateStyle: "short" }).format(new Date());
   const prefijo = (prescripcionAlerta ? `[PRESCRIPCION x${prescripcionAlerta}] ` : "") + (caducidadRevision ? `[REVISION CADUCIDAD x${caducidadRevision}] ` : "") + (prioritarias ? `[${prioritarias} PRIORITARIA(S)] ` : "");
+  // Estado de la clave en el ASUNTO (pedido nov-2026): rechazada > vencida por fecha > por vencer.
+  const claveRechazada = FALLA_TOTAL && /CLAVE INVALIDA|clave MEV esta vencida|cambio de clave/i.test(FALLA_TOTAL.motivo);
+  const avisoClave = claveRechazada ? "[CLAVE MEV VENCIDA/INVALIDA - renovar YA] "
+    : (AVISO_CLAVE != null ? (AVISO_CLAVE < 0 ? "[CLAVE MEV POSIBLEMENTE VENCIDA] " : `[CLAVE MEV VENCE EN ${AVISO_CLAVE} DIA(S)] `) : "");
   const falla = FALLA_TOTAL ? `[FALLA MEV - 0 de ${FALLA_TOTAL.consultadas} causas consultadas] `
     : (FALLA_PARCIAL ? `[MEV: ${FALLA_PARCIAL.fallidas} de ${FALLA_PARCIAL.consultadas} sin consultar] ` : "");
-  const asunto = `${falla}${prefijo}Parte MEV ${fechaCorta} - ${novedades} novedad(es) / ${causas} causa(s)`;
+  const asunto = `${avisoClave}${falla}${prefijo}Parte MEV ${fechaCorta} - ${novedades} novedad(es) / ${causas} causa(s)`;
   log("Conectando al servidor de correo...");
   await t.sendMail({ from: CFG.mailFrom, to: CFG.mailTo, subject: asunto, text: texto, html, attachments: adjuntos });
   log(`Email enviado a ${CFG.mailTo}${adjuntos.length ? ` (${adjuntos.length} adjunto/s)` : ""}`);
@@ -293,10 +297,11 @@ async function enviarAlertaFalla(err) {
   try {
     const t = crearTransport();
     const fecha = new Intl.DateTimeFormat("es-AR", { timeZone: "America/Argentina/Buenos_Aires", dateStyle: "short", timeStyle: "short" }).format(new Date());
-    const extra = err && err.claveVencida ? " CLAVE MEV VENCIDA: renovarla a mano en mev.scba.gov.ar (la MEV fuerza cambio cada 90 dias)." : "";
+    const esClave = err && (err.claveVencida || /CLAVE INVALIDA/i.test(err.message || ""));
+    const extra = esClave ? " CLAVE MEV VENCIDA: renovarla a mano en mev.scba.gov.ar (la MEV fuerza cambio cada 90 dias)." : "";
     await t.sendMail({
       from: CFG.mailFrom, to: CFG.mailToAlerta,
-      subject: `[FALLA] Parte MEV ${fecha} - la corrida NO se completo`,
+      subject: `${esClave ? "[CLAVE MEV VENCIDA/INVALIDA - renovar YA] " : ""}[FALLA] Parte MEV ${fecha} - la corrida NO se completo`,
       text: [`El parte diario de la MEV (SCBA) NO se genero.`, ``, `Fecha/hora: ${fecha}`, `Error: ${err && err.message ? err.message : String(err)}`, ``, `Accion: entrar a mev.scba.gov.ar a mano y revisar.${extra}`, `Causas posibles: MEV caida, clave vencida (cambio forzado cada 90 dias), cambio del HTML del portal, o corte de red.`].join("\n"),
     });
     log(`Alerta de falla enviada a ${CFG.mailToAlerta}`);
@@ -320,6 +325,7 @@ async function main() {
   // muestra en el mail si esta dentro del umbral configurado (o ya vencida).
   const diasClave = diasHastaVencimientoClave();
   const avisoClaveDias = diasClave != null && diasClave <= CFG.avisoClaveDias ? diasClave : null;
+  AVISO_CLAVE = avisoClaveDias;
   if (avisoClaveDias != null) log(`Aviso: clave MEV ${avisoClaveDias < 0 ? "posiblemente vencida" : `vence en ${avisoClaveDias} dia(s)`}.`);
 
   // 1) Siembra: por cada jurisdiccion, recorrer TODOS los sets (incluye el set
