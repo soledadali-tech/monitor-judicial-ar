@@ -221,11 +221,15 @@ function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescr
   if (fallos && fallos.length) {
     const posibleCaida = fallos.length >= Math.max(3, Math.ceil(vigiladas * 0.5));
     texto += `>>> CAUSAS QUE NO SE PUDIERON CONSULTAR (${fallos.length}) - revisar a mano <<<\n`;
-    for (const f of fallos) texto += `  [x] ${f.ref}: ${f.motivo}\n`;
+    const motivos = new Set(fallos.map((f) => f.motivo.replace(/^jurisdiccion "[^"]*": /, "")));
+    const compacto = motivos.size === 1 && fallos.length > 3; // mismo motivo para todas: una sola linea
+    if (compacto) texto += `  Todas por el mismo motivo: ${[...motivos][0]}\n  Causas: ${fallos.map((f) => f.ref).join(", ")}\n`;
+    else for (const f of fallos) texto += `  [x] ${f.ref}: ${f.motivo}\n`;
     if (posibleCaida) texto += `  POSIBLE CAIDA GENERAL DE LA MEV hoy (o clave vencida: la MEV fuerza cambio cada 90 dias). Si la SCBA declara el dia inhabil, cargar la fecha en feria-pba.json (inhabilesExcepcionales).\n`;
     texto += "\n";
     html += `<div style="border:1px solid #b58900;border-radius:4px;padding:6px 10px;margin:10px 0;background:#fdf6e3"><b style="color:#b58900">No se pudieron consultar (${fallos.length})</b>${posibleCaida ? ` &mdash; <b>posible caida general de la MEV</b> (o clave vencida, cambio forzado cada 90 dias). Si la SCBA declara inhabil, cargarlo en feria-pba.json` : ""}<ul style="margin:6px 0">`;
-    for (const f of fallos) html += `<li>${f.ref}: ${f.motivo}</li>`;
+    if (compacto) html += `<li>Todas por el mismo motivo: ${[...motivos][0]}</li><li style="font-size:12px;color:#777">Causas: ${fallos.map((f) => f.ref).join(", ")}</li>`;
+    else for (const f of fallos) html += `<li>${f.ref}: ${f.motivo}</li>`;
     html += "</ul></div>";
   }
 
