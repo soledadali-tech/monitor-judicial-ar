@@ -70,3 +70,5 @@ Thumbs.db
 
 # volcado de diagnostico del login MEV (puede tener datos de la sesion)
 mev-login-debug.html
+# token del portal PJN cacheado (solo servidor)
+.pjn-token.json

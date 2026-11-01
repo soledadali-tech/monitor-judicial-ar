@@ -246,15 +246,54 @@ function marcaNegativa(it) {
 }
 
 // ─── 1) login + captura de token via navegador real ──────────────────────────
+// Token cacheado: Chrome es lo que mas memoria usa (~300-400 MB). Si el token de la
+// corrida anterior sigue vigente (claim "exp" del JWT con margen de 3 min), se reusa
+// y no se abre Chrome. El archivo queda solo en el servidor (.gitignore).
+const TOKEN_CACHE = path.resolve(__dirname, ".pjn-token.json");
+function expDeJwt(t) {
+  try { return JSON.parse(Buffer.from(t.split(".")[1], "base64url").toString("utf8")).exp * 1000 || 0; } catch { return 0; }
+}
 async function obtenerToken() {
+  try {
+    const c = JSON.parse(fs.readFileSync(TOKEN_CACHE, "utf8"));
+    const exp = expDeJwt(c.token);
+    if (exp - Date.now() > 3 * 60000) {
+      const r = await fetch(`${API}/eventos/?page=0&pageSize=1&categoria=judicial`, { headers: { Authorization: `Bearer ${c.token}` } });
+      if (r.ok) { log(`Token reusado (vence ${new Date(exp).toISOString()}): sin abrir Chrome.`); return c.token; }
+    }
+  } catch { /* sin cache o invalido */ }
+  const token = await obtenerTokenChrome();
+  try {
+    fs.writeFileSync(TOKEN_CACHE, JSON.stringify({ token, guardado: new Date().toISOString() }), { mode: 0o600 });
+    const exp = expDeJwt(token);
+    if (exp) log(`Token nuevo: dura ${Math.round((exp - Date.now()) / 60000)} min.`);
+  } catch {}
+  return token;
+}
+
+async function obtenerTokenChrome() {
   fs.mkdirSync(CFG.profileDir, { recursive: true });
   const browser = await puppeteer.launch({
     headless: CFG.headless ? "new" : false,
     userDataDir: CFG.profileDir,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    // Flags para maquina chica (1 GB): sin GPU, sin /dev/shm (usa /tmp), sin
+    // extensiones ni procesos extra, y tope de memoria al V8 de las paginas.
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+      "--disable-extensions", "--disable-background-networking", "--disable-default-apps",
+      "--disable-sync", "--no-first-run", "--mute-audio", "--renderer-process-limit=1",
+      "--disable-features=Translate,BackForwardCache,MediaRouter,OptimizationHints",
+      "--js-flags=--max-old-space-size=192"],
   });
   try {
     const page = (await browser.pages())[0] || (await browser.newPage());
+    // No bajar imagenes, fuentes, estilos ni media: solo hace falta que la app pida
+    // el token a la API. Ahorra memoria y tiempo (y baja los Timeout).
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      const tipo = req.resourceType();
+      if (tipo === "image" || tipo === "font" || tipo === "media" || tipo === "stylesheet") req.abort().catch(() => {});
+      else req.continue().catch(() => {});
+    });
     let token = null;
     page.on("request", (req) => {
       const a = req.headers()["authorization"] || req.headers()["Authorization"];

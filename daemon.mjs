@@ -145,27 +145,43 @@ function proximaFechaAR(hora, diaSemana = null) {
   return new Date(candidato);
 }
 
-const corriendo = new Set();
+// ─── cola secuencial (optimizacion para VPS de 1 GB) ───────────────────────────
+// Antes cada frente se lanzaba en paralelo: PJN (Chrome) + MEV + agenda a la misma
+// hora se pisaban en RAM y el sistema terminaba en swap. Ahora corre UNO por vez, en
+// el orden en que les toca. Ademas cada hijo arranca con un tope de heap de Node
+// (NODE_HIJO_MAX_MB, default 320) para que un pico no se coma la maquina.
+const corriendo = new Set(); // scripts en cola o corriendo
+const cola = [];
+let ocupado = false;
+const MAX_MB = Number(process.env.NODE_HIJO_MAX_MB || 320);
 
 function correr(frente) {
   if (corriendo.has(frente.script)) {
-    log(`[SKIP] ${frente.script} - la corrida anterior todavia esta activa, no se dispara de nuevo.`);
+    log(`[SKIP] ${frente.script} - ya esta en cola o corriendo, no se dispara de nuevo.`);
     return;
   }
   corriendo.add(frente.script);
+  cola.push(frente);
+  if (cola.length > 1 || ocupado) log(`[COLA] ${frente.script} espera su turno (${cola.length} en cola).`);
+  siguiente();
+}
+
+function siguiente() {
+  if (ocupado || !cola.length) return;
+  const frente = cola.shift();
+  ocupado = true;
   log(`[INICIO] ${frente.script}`);
   const fd = fs.openSync(path.resolve(__dirname, frente.logFile), "a");
-  const child = spawn(process.execPath, [frente.script], { cwd: __dirname, stdio: ["ignore", fd, fd] });
-  child.on("exit", (code) => {
-    fs.closeSync(fd);
+  const fin = (msg) => {
+    try { fs.closeSync(fd); } catch {}
     corriendo.delete(frente.script);
-    log(`[FIN] ${frente.script} - codigo ${code}${code !== 0 ? " (revisar " + frente.logFile + ")" : ""}`);
-  });
-  child.on("error", (e) => {
-    fs.closeSync(fd);
-    corriendo.delete(frente.script);
-    log(`[ERROR] no se pudo lanzar ${frente.script}: ${e.message}`);
-  });
+    ocupado = false;
+    log(msg);
+    setTimeout(siguiente, 5000); // respiro para que el SO libere la memoria del anterior
+  };
+  const child = spawn(process.execPath, [`--max-old-space-size=${MAX_MB}`, frente.script], { cwd: __dirname, stdio: ["ignore", fd, fd] });
+  child.on("exit", (code, signal) => fin(`[FIN] ${frente.script} - codigo ${code}${signal ? " senal " + signal : ""}${code !== 0 ? " (revisar " + frente.logFile + ")" : ""}`));
+  child.on("error", (e) => fin(`[ERROR] no se pudo lanzar ${frente.script}: ${e.message}`));
 }
 
 function programar(frente, hora, diaSemana) {
