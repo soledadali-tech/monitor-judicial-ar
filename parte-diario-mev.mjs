@@ -168,6 +168,11 @@ function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescr
 
   let texto = `Parte diario MEV - SCBA (Provincia de Buenos Aires) - ${fecha}\nVentana: ${ventanaDesc}. ${novedades.length} novedad(es) en ${porCausa.size} causa(s). Vigiladas: ${vigiladas}.\n\n`;
   let html = `<h2>Parte diario MEV - SCBA (Provincia de Buenos Aires)</h2><p><b>${fecha}</b><br>Ventana: ${ventanaDesc}. ${novedades.length} novedad(es) en ${porCausa.size} causa(s). Causas vigiladas: ${vigiladas}.</p>`;
+  if (FALLA_TOTAL) {
+    const m = `NO SE PUDO CONSULTAR NINGUNA CAUSA: el "0 novedades" de este parte NO es real. Motivo: ${FALLA_TOTAL.motivo}`;
+    texto += `>>> ${m} <<<\n\n`;
+    html += `<div style="border:2px solid #8b1e1e;border-radius:4px;padding:8px 10px;margin:10px 0;background:#fdecea"><b style="color:#8b1e1e">⛔ ${m}</b></div>`;
+  }
 
   // Aviso anticipado de vencimiento de la clave MEV (politica 90 dias) — ver
   // lib/mev-auth.mjs diasHastaVencimientoClave(). Solo se calcula si la usuaria
@@ -255,11 +260,14 @@ function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescr
   return { texto, html, causas: porCausa.size, prioritarias: prioritarias.length, caducidadRevision: (caducidad && caducidad.revision) || 0, prescripcionAlerta: (prescripcion && prescripcion.alerta) || 0 };
 }
 
+let FALLA_TOTAL = null, FALLA_PARCIAL = null;
 async function enviar({ texto, html }, novedades, causas, prioritarias, caducidadRevision = 0, prescripcionAlerta = 0, adjuntos = []) {
   const t = crearTransport();
   const fechaCorta = new Intl.DateTimeFormat("es-AR", { timeZone: "America/Argentina/Buenos_Aires", dateStyle: "short" }).format(new Date());
   const prefijo = (prescripcionAlerta ? `[PRESCRIPCION x${prescripcionAlerta}] ` : "") + (caducidadRevision ? `[REVISION CADUCIDAD x${caducidadRevision}] ` : "") + (prioritarias ? `[${prioritarias} PRIORITARIA(S)] ` : "");
-  const asunto = `${prefijo}Parte MEV ${fechaCorta} - ${novedades} novedad(es) / ${causas} causa(s)`;
+  const falla = FALLA_TOTAL ? `[FALLA MEV - 0 de ${FALLA_TOTAL.consultadas} causas consultadas] `
+    : (FALLA_PARCIAL ? `[MEV: ${FALLA_PARCIAL.fallidas} de ${FALLA_PARCIAL.consultadas} sin consultar] ` : "");
+  const asunto = `${falla}${prefijo}Parte MEV ${fechaCorta} - ${novedades} novedad(es) / ${causas} causa(s)`;
   log("Conectando al servidor de correo...");
   await t.sendMail({ from: CFG.mailFrom, to: CFG.mailTo, subject: asunto, text: texto, html, attachments: adjuntos });
   log(`Email enviado a ${CFG.mailTo}${adjuntos.length ? ` (${adjuntos.length} adjunto/s)` : ""}`);
@@ -459,6 +467,12 @@ async function main() {
   }
 
   log(`Novedades en la ventana: ${novedades.length}; ${fallos.length} causa(s) con error.`);
+  {
+    const consultadas = vigiladas.slice(0, CFG.maxExp).length;
+    const ok = consultadas - fallos.length;
+    if (consultadas > 0 && ok <= 0) FALLA_TOTAL = { consultadas, motivo: (fallos[0] && fallos[0].motivo) || "" };
+    else if (consultadas > 0 && fallos.length) FALLA_PARCIAL = { consultadas, fallidas: fallos.length };
+  }
 
   // Sync a Supabase (tabla public.casos de dashboard-legal). Diseno conservador: ver
   // lib/sync-supabase.mjs. No-op si SUPABASE_URL/SUPABASE_SERVICE_KEY no estan en .env.

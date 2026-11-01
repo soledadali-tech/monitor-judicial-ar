@@ -71,6 +71,9 @@ const CFG = {
   modoVentana: (process.env.MODO_VENTANA || "habil").toLowerCase(), // habil | fijo
   feriados: (process.env.FERIADOS || "").split(",").map((s) => s.trim()).filter(Boolean),
   paginas: Number(process.env.PAGINAS || 5),
+  // Dias hacia atras en los que se buscan eventos todavia NO reportados (por si una
+  // corrida no se hizo o el portal publico tarde algo con fecha de firma anterior).
+  lookbackDias: Number(process.env.LOOKBACK_DIAS || 10),
   profileDir: process.env.PROFILE_DIR || path.resolve(__dirname, ".pjn-profile"),
   headless: (process.env.HEADLESS || "true") !== "false",
   enviarSinNovedades: (process.env.ENVIAR_SIN_NOVEDADES || "true") !== "false",
@@ -582,8 +585,22 @@ async function main() {
 
   const { corte, desc } = calcularCorte();
   log(`Ventana: ${desc} (corte ${new Date(corte).toISOString()})`);
-  const nuevos = items.filter((it) => (it.fechaAccion || it.fechaCreacion || 0) >= corte);
-  log(`Novedades en la ventana: ${nuevos.length}`);
+  // FIX nov-2026: antes se filtraba solo por fechaAccion >= ultimo dia habil. Asi se
+  // perdian (a) los eventos que el portal publica tarde con fecha de firma anterior y
+  // (b) todo lo de los dias en que la corrida no se hizo (VPS caido). Ahora es novedad
+  // todo evento que todavia NO se reporto (no figura en movimientos-pjn.csv) y que es
+  // de los ultimos LOOKBACK_DIAS. Sin historial (CSV vacio) se usa la ventana de siempre.
+  const { idsYaRegistrados } = await import("./lib/movimientos-log.mjs");
+  const vistos = idsYaRegistrados();
+  const lookbackMs = Date.now() - CFG.lookbackDias * 86400000;
+  const fechaEv = (it) => Math.max(Number(it.fechaCreacion) || 0, Number(it.fechaAccion) || 0);
+  const nuevos = vistos.size === 0
+    ? items.filter((it) => fechaEv(it) >= corte)
+    : items.filter((it) => !vistos.has(String(it.id)) && fechaEv(it) >= lookbackMs);
+  const atrasados = nuevos.filter((it) => fechaEv(it) < corte).length;
+  const descParte = vistos.size === 0 ? desc
+    : `${desc}; + eventos no reportados de los ultimos ${CFG.lookbackDias} dias${atrasados ? ` (${atrasados} atrasado/s)` : ""}`;
+  log(`Novedades: ${nuevos.length} (${atrasados} de dias anteriores no reportados). Feed: ${items.length} evento(s) leidos; ${vistos.size} ya registrados.`);
 
   if (nuevos.length === 0 && !CFG.enviarSinNovedades) {
     log("Sin novedades y ENVIAR_SIN_NOVEDADES=false: no se envia correo.");
@@ -740,7 +757,7 @@ async function main() {
     log(`Volcado de plazos a la cartera omitido: ${e.message}`);
   }
 
-  const parte = armarParte(nuevos, desc, fallos, caducidadRender, penalRender, agenda);
+  const parte = armarParte(nuevos, descParte, fallos, caducidadRender, penalRender, agenda);
   await enviar(parte, adjuntos, nuevos.length, parte.fueros, parte.prioritarias, parte.revisionCaducidad, parte.aplicabilidadCaducidad);
   registrarCorrida(`${nuevos.length} novedades, ${parte.prioritarias} prioritarias, ${adjuntos.length} PDFs, ${fallos.length} descargas fallidas`);
 
