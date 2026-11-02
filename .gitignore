@@ -76,3 +76,9 @@ mev-login-debug.html
 foto-semanal.json
 caducidad-foto.json
 ultimo-parte-no-enviado.html
+
+# planilla LISTADO JUICIOS (nov-2026)
+apps-script/planilla-bot.gs
+planilla-vinculos.json
+planilla-migrada.json
+planilla-sugerencias.json

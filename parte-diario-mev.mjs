@@ -229,6 +229,19 @@ function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescr
     texto += "\n"; html += "</ul></div>";
   }
 
+  // Planilla: lo que el bot aplico, lo que sugiere hoy y lo que sigue sin confirmar.
+  if (APLICADOS.length || SUGERENCIAS.length || PENDIENTES.length) {
+    const url = `https://docs.google.com/spreadsheets/d/${process.env.PLANILLA_SHEET_ID || "1d59JfgSQepz-B8WmAfHdWs4Vl10YGcxn3xV9eK8kjok"}/edit`;
+    const li = (x, extra) => `<li><b>${x.causa || ""}</b> &mdash; ${x.hoja}, fila ${x.fila}: ${extra}</li>`;
+    texto += `>>> PLANILLA LISTADO JUICIOS <<<\n`;
+    html += `<div style="border:1px solid #1e6b3a;border-radius:4px;padding:8px 10px;margin:10px 0"><b style="color:#1e6b3a">Planilla LISTADO JUICIOS</b> &middot; <a href="${url}">abrir</a><ul style="margin:6px 0;font-size:13px">`;
+    for (const x of APLICADOS) { texto += `  [APLICADO] ${x.causa} (${x.hoja} fila ${x.fila}): ${x.detalle}\n`; html += li(x, `<b>aplicado</b> &mdash; ${x.detalle}`); }
+    for (const x of SUGERENCIAS) { texto += `  [SUGERENCIA NUEVA] ${x.causa} (${x.hoja} fila ${x.fila}): ${x.columna} = ${x.valor} - ${x.motivo}\n`; html += li(x, `<b>sugerencia nueva</b> ${x.columna} = <b>${x.valor}</b> <span style="color:#555">(${x.motivo})</span>`); }
+    for (const x of PENDIENTES) { texto += `  [SIN CONFIRMAR] ${x.causa} (${x.hoja} fila ${x.fila}): ${x.columna} = ${x.valor}\n`; html += li(x, `sin confirmar: ${x.columna} = <b>${x.valor}</b>`); }
+    texto += `  Para confirmar una sugerencia, sacale el "?" en la planilla. Si no corresponde, borrala (no se vuelve a sugerir).\n\n`;
+    html += `</ul><div style="font-size:12px;color:#555">Para confirmar una sugerencia, sacale el "?" en la planilla. Si no corresponde, borrala: no se vuelve a sugerir.</div></div>`;
+  }
+
   if (caducidad && caducidad.texto) { texto += caducidad.texto + "\n"; html += caducidad.html; }
   // Prescripcion de la accion penal (cartera penal PBA).
   if (prescripcion && prescripcion.texto) { texto += prescripcion.texto + "\n"; html += prescripcion.html; }
@@ -281,6 +294,7 @@ function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescr
 }
 
 let FALLA_TOTAL = null, FALLA_PARCIAL = null, AVISO_CLAVE = null;
+const SUGERENCIAS = [], PENDIENTES = [], APLICADOS = []; // planilla LISTADO JUICIOS
 async function enviar({ texto, html }, novedades, causas, prioritarias, caducidadRevision = 0, prescripcionAlerta = 0, adjuntos = []) {
   const t = crearTransport();
   const fechaCorta = new Intl.DateTimeFormat("es-AR", { timeZone: "America/Argentina/Buenos_Aires", dateStyle: "short" }).format(new Date());
@@ -392,6 +406,7 @@ async function main() {
     const planilla = await obtenerPlanilla();
     if (planilla.error) log(`Planilla: ${planilla.stale ? "usando cache anterior, " : ""}${planilla.error}`);
     const rp = await aplicarPlanilla(planilla.porSistema.MEV);
+    if (!rp.nota && !rp.migrada) { const { completarMigracion } = await import("./lib/planilla-gestion.mjs"); await completarMigracion("MEV", rp.migrar, log); }
     if (rp.nota) log(`Planilla -> cartera: ${rp.nota}`);
     else {
       log(`Planilla -> cartera: ${rp.matcheadas} matcheada(s), ${rp.agregadas} agregada(s).`);
@@ -436,6 +451,7 @@ async function main() {
   const fallos = [];
   const agenda = [];        // { causa, paso, audiencia } - audiencias detectadas (ver lib/agenda-audiencias.mjs)
 
+  const fichaPorNid = new Map(); // para las sugerencias a la planilla
   const porJur = new Map();
   for (const c of vigiladas.slice(0, CFG.maxExp)) {
     const k = c.jurisdiccion || (JURS[0] && JURS[0].clave) || "";
@@ -457,6 +473,7 @@ async function main() {
         c.expedienteRef = ficha.expediente || c.nidCausa;
         c.caratula = c.caratula || ficha.caratula;
         c.estado = ficha.estado || c.estado;
+        fichaPorNid.set(String(c.nidCausa), { pasos: ficha.pasos || [], estado: ficha.estado || "" });
         let reportables = nuevos;
         let baseline = [];
         if (!corte) {
@@ -499,6 +516,68 @@ async function main() {
   }
 
   log(`Novedades en la ventana: ${novedades.length}; ${fallos.length} causa(s) con error.`);
+
+  // ── Sugerencias a la planilla LISTADO JUICIOS (nov-2026) ─────────────────────
+  // Reduce vigilancia -> se SUGIERE con "?" y se aplica recien cuando la usuaria lo
+  // confirma. Aumenta vigilancia (salio la resolucion de una causa EN ESPERA) -> se
+  // aplica directo. Nunca se repite una sugerencia ya hecha (planilla-sugerencias.json).
+  try {
+    const G = await import("./lib/planilla-gestion.mjs");
+    const vinc = (G.leerVinculos().MEV) || {};
+    const regPath = path.resolve(__dirname, "planilla-sugerencias.json");
+    let reg = {}; try { reg = JSON.parse(fs.readFileSync(regPath, "utf8")); } catch {}
+    const hoyTxt = new Intl.DateTimeFormat("es-AR", { timeZone: "America/Argentina/Buenos_Aires", dateStyle: "short" }).format(new Date());
+    const cuits = String(process.env.LETRADOS_CUIT || `20290550166,${process.env.PJN_USER || ""}`).split(",").map((x) => x.replace(/\D/g, "")).filter((x) => x.length === 11);
+    const RX_ESPERA = /autos para (sentencia|resolver)|pasen? (los autos )?(a|para) (resolver|sentencia)|a despacho para resolver|elev\w* .{0,40}c[aá]mara|recurso concedido|conc[eé]dese .{0,30}recurso|autos a (la )?(excma\.? )?c[aá]mara/i;
+    const RX_RESUELTO = /sentencia|resoluci[oó]n|resuelv|devuel|baj\w* (de )?(los autos|c[aá]mara)|vuelvan los autos/i;
+    const RX_CERRADA = /archiv|termin|finaliz|conclu/i;
+    const fechaPaso = (p) => parseDia(p.fechaHora || p.fecha);
+    const cambios = [], aplicados = [];
+    const sugerir = (v, col, celda, valor, motivo) => {
+      const val = G.armarSugerencia(celda, valor);
+      const k = `${v.hoja}|${v.fila}|${col}|${valor}`;
+      if (!val || reg[k]) return;
+      reg[k] = new Date().toISOString();
+      cambios.push({ hoja: v.hoja, fila: v.fila, columna: col, valor: val, tipo: "sugerencia", nota: `Sugerido por el bot el ${hoyTxt}: ${motivo}. Para aplicarlo, sacale el "?". Si no corresponde, borralo (no se vuelve a sugerir).` });
+      SUGERENCIAS.push({ causa: v.caratula, hoja: v.hoja, fila: v.fila, columna: col, valor: val, motivo });
+    };
+    for (const [nid, v] of Object.entries(vinc)) {
+      const f = fichaPorNid.get(String(nid)); if (!f) continue;
+      const g = { vig: G.leerCelda(""), cad: G.leerCelda(""), imp: G.leerCelda(""), ...(v.crudo || {}) };
+      const pasos = [...f.pasos].sort((a, b) => (fechaPaso(a) || 0) - (fechaPaso(b) || 0));
+      const ult = pasos[pasos.length - 1];
+      const nuevosCausa = novedades.filter((n) => String(n.causa.nidCausa) === String(nid));
+      // 1) Causa cerrada -> sugerir dejar de vigilar.
+      if (RX_CERRADA.test(f.estado) && !/^no$/i.test(g.vig.vigente)) sugerir(v, "VIGILAR", g.vig, "NO", `la MEV muestra la causa como "${f.estado}"`);
+      // 2) Salio la resolucion de una causa EN ESPERA -> la caducidad vuelve a correr (directo).
+      const enEspera = /espera|pendiente|resol/i.test(g.cad.vigente);
+      const resolucion = nuevosCausa.find((n) => RX_RESUELTO.test(n.paso.descripcion || ""));
+      if (enEspera && resolucion) {
+        cambios.push({ hoja: v.hoja, fila: v.fila, columna: "CADUCIDAD", valor: "", tipo: "aplicado", nota: `El bot saco "EN ESPERA" el ${hoyTxt}: hubo "${resolucion.paso.descripcion}" (${resolucion.paso.fechaHora || resolucion.paso.fecha}). La caducidad vuelve a correr.` });
+        aplicados.push({ causa: v.caratula, hoja: v.hoja, fila: v.fila, detalle: `CADUCIDAD: se saco "EN ESPERA" por "${resolucion.paso.descripcion}"` });
+      } else if (!enEspera && !/^no$/i.test(g.cad.vigente) && ult && RX_ESPERA.test(ult.descripcion || "")) {
+        // 3) Ultimo paso = a resolver / elevada a Camara -> sugerir EN ESPERA.
+        sugerir(v, "CADUCIDAD", g.cad, "EN ESPERA", `el ultimo paso es "${ult.descripcion}" (${ult.fechaHora || ult.fecha})`);
+      }
+      // 4) Escrito propio nuevo (firmado por Rossi o por vos) -> sugerir ULT. IMPULSO.
+      const propios = nuevosCausa.filter((n) => n.proveido && cuits.some((c) => n.proveido.includes(`(${c})`)));
+      const masNuevo = propios.map((n) => ({ n, d: fechaPaso(n.paso) })).filter((x) => x.d).sort((a, b) => b.d - a.d)[0];
+      if (masNuevo) {
+        const vig = G.parseFecha(g.imp.vigente);
+        if (!vig || masNuevo.d > vig) sugerir(v, "ULT. IMPULSO", g.imp, G.fmtFecha(masNuevo.d), `escrito propio "${masNuevo.n.paso.descripcion}" del ${G.fmtFecha(masNuevo.d)}`);
+      }
+      // Sugerencias que siguen esperando confirmacion en la planilla.
+      for (const [col, celda] of [["VIGILAR", g.vig], ["CADUCIDAD", g.cad], ["ULT. IMPULSO", g.imp]])
+        if (celda.sugerido && !SUGERENCIAS.some((x) => x.hoja === v.hoja && x.fila === v.fila && x.columna === col)) PENDIENTES.push({ causa: v.caratula, hoja: v.hoja, fila: v.fila, columna: col, valor: `${celda.sugerido}?` });
+    }
+    APLICADOS.push(...aplicados);
+    if (cambios.length) {
+      const r = await G.escribirCambios(cambios);
+      if (r.nota) log(`Planilla: ${r.nota} (${cambios.length} sugerencia(s) quedan solo en el mail)`);
+      else log(`Planilla: ${r.hechos} celda(s) escritas${r.errores.length ? `; errores: ${r.errores.join(" | ")}` : ""}.`);
+      if (!r.nota && !r.errores.length) fs.writeFileSync(regPath, JSON.stringify(reg));
+    }
+  } catch (e) { log(`Sugerencias a la planilla omitidas: ${e.message}`); }
   {
     const consultadas = vigiladas.slice(0, CFG.maxExp).length;
     const ok = consultadas - fallos.length;

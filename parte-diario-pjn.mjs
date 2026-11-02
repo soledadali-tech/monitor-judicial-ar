@@ -691,6 +691,7 @@ async function main() {
     const planilla = await obtenerPlanilla();
     if (planilla.error) log(`Planilla: ${planilla.stale ? "usando cache anterior, " : ""}${planilla.error}`);
     const rp = await aplicarPlanilla(planilla.porSistema.PJN);
+    if (!rp.nota && !rp.migrada) { const { completarMigracion } = await import("./lib/planilla-gestion.mjs"); await completarMigracion("PJN", rp.migrar, log); }
     if (rp.nota) log(`Planilla -> cartera: ${rp.nota}`);
     else {
       log(`Planilla -> cartera: ${rp.matcheadas} matcheada(s), ${rp.agregadas} agregada(s) desde la planilla.`);
