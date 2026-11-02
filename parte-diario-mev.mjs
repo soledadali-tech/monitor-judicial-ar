@@ -291,6 +291,12 @@ async function enviar({ texto, html }, novedades, causas, prioritarias, caducida
     : (AVISO_CLAVE != null ? (AVISO_CLAVE < 0 ? "[CLAVE MEV POSIBLEMENTE VENCIDA] " : `[CLAVE MEV VENCE EN ${AVISO_CLAVE} DIA(S)] `) : "");
   const falla = FALLA_TOTAL ? `[FALLA MEV - 0 de ${FALLA_TOTAL.consultadas} causas consultadas] `
     : (FALLA_PARCIAL ? `[MEV: ${FALLA_PARCIAL.fallidas} de ${FALLA_PARCIAL.consultadas} sin consultar] ` : "");
+  const { guardarSalida } = await import("./lib/salida-parte.mjs");
+  if (guardarSalida("MEV", { asunto: `${avisoClave}${falla}${prefijo}Parte MEV`, prefijo: `${avisoClave}${falla}${prefijo}`, texto, html, adjuntos, novedades, prioritarias,
+    falla: FALLA_TOTAL ? "total" : (FALLA_PARCIAL ? "parcial" : ""), fallidas: FALLA_TOTAL ? FALLA_TOTAL.consultadas : (FALLA_PARCIAL ? FALLA_PARCIAL.fallidas : 0) })) {
+    log("Modo combinado: parte MEV guardado para el mail unico (no se manda mail propio).");
+    return;
+  }
   const asunto = `${avisoClave}${falla}${prefijo}Parte MEV ${fechaCorta} - ${novedades} novedad(es) / ${causas} causa(s)`;
   log("Conectando al servidor de correo...");
   await t.sendMail({ from: CFG.mailFrom, to: CFG.mailTo, subject: asunto, text: texto, html, attachments: adjuntos });
@@ -583,6 +589,23 @@ async function main() {
   let caducidadRender = null, caducidadTodas = [], prescripcionTodas = [];
   try {
     const cad = await calcularCaducidadMev();
+    // Caducidad SEMANAL (pedido nov-2026): el lunes va completa y se guarda una foto de
+    // los niveles. Martes a viernes solo lo que cambio desde el lunes, mas lo que no puede
+    // esperar (INTIMADA o vence en <= 5 dias). CADUCIDAD_SEMANAL=false vuelve a "todos los dias".
+    if ((process.env.CADUCIDAD_SEMANAL || "true") !== "false" && cad.items) {
+      const fotoPath = path.resolve(__dirname, "caducidad-foto.json");
+      const esLunes = new Date(Date.now() - 3 * 3600000).getUTCDay() === 1;
+      let foto = null; try { foto = JSON.parse(fs.readFileSync(fotoPath, "utf8")); } catch {}
+      const clave = (it) => `${it.fase}|${it.nivel}`;
+      if (esLunes || !foto) {
+        try { fs.writeFileSync(fotoPath, JSON.stringify({ fecha: new Date().toISOString(), items: cad.items.map((it) => [it.ref, clave(it)]) })); } catch {}
+      } else {
+        const prev = new Map(foto.items || []);
+        const total = cad.items.length;
+        cad.items = cad.items.filter((it) => prev.get(it.ref) !== clave(it) || it.fase === "intimada" || (it.fase === "encurso" && it.restan <= 5));
+        cad.resumen = { total, cambios: cad.items.length, desde: foto.fecha };
+      }
+    }
     if (cad.nota) log(`Caducidad MEV: ${cad.nota}`);
     else if (cad.items.length) log(`Caducidad MEV: ${cad.items.length} causa(s) en zona/riesgo; ${cad.sinImpulso || 0} sin impulso verificado`);
     caducidadTodas = cad.todas || [];

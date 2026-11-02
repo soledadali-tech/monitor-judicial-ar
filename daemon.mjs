@@ -10,6 +10,7 @@
  * DESPLIEGUE-VPS.md para crontab, resuelto de raiz).
  *
  * Config .env (todas opcionales; un frente sin variable simplemente no se agenda):
+ *   CRON_COMBINADO=08:00,18:00 (UN mail con PJN+MEV, dias habiles; reemplaza CRON_PJN/CRON_MEV)
  *   CRON_PJN=08:00,18:00
  *   CRON_MEV=08:30
  *   CRON_EJE=09:00
@@ -107,6 +108,7 @@ const FRENTES = {
   eje: { script: "parte-diario-eje.mjs", env: "CRON_EJE", logFile: "parte-eje.log" },
   mev: { script: "parte-diario-mev.mjs", env: "CRON_MEV", logFile: "parte-mev.log" },
   agenda: { script: "agenda-audiencias-semanal.mjs", env: "CRON_AGENDA", diaEnv: "CRON_AGENDA_DIA", logFile: "agenda.log" },
+  combinado: { script: "parte-combinado.mjs", env: "CRON_COMBINADO", logFile: "parte-combinado.log" },
   backup: { script: "backup-datos.mjs", env: "CRON_BACKUP", diaEnv: "CRON_BACKUP_DIA", logFile: "backup.log" },
 };
 

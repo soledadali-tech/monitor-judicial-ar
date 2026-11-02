@@ -72,3 +72,7 @@ Thumbs.db
 mev-login-debug.html
 # token del portal PJN cacheado (solo servidor)
 .pjn-token.json
+.salida/
+foto-semanal.json
+caducidad-foto.json
+ultimo-parte-no-enviado.html

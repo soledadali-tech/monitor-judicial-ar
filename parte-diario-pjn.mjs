@@ -533,6 +533,11 @@ async function enviar({ texto, html }, adjuntos, nuevos, fueros, prioritarias, r
   const fechaCorta = new Intl.DateTimeFormat("es-AR", { timeZone: "America/Argentina/Buenos_Aires", dateStyle: "short" }).format(new Date());
   const prefijo = (revisionCaducidad ? `[REVISION CADUCIDAD x${revisionCaducidad}] ` : "") + (aplicabilidadCaducidad ? `[VERIFICAR APLICABILIDAD x${aplicabilidadCaducidad}] ` : "") + (prioritarias ? `[${prioritarias} PRIORITARIA(S)] ` : "");
   const asunto = `${prefijo}Parte PJN ${fechaCorta} - ${nuevos} novedad(es) / ${fueros} fuero(s)`;
+  const { guardarSalida } = await import("./lib/salida-parte.mjs");
+  if (guardarSalida("PJN", { asunto, prefijo, texto, html, adjuntos, novedades: nuevos, prioritarias, falla: "" })) {
+    log("Modo combinado: parte PJN guardado para el mail unico (no se manda mail propio).");
+    return;
+  }
   log("Conectando al servidor de correo para enviar...");
   await t.sendMail({ from: CFG.mailFrom, to: CFG.mailTo, subject: asunto, text: texto, html, attachments: adjuntos });
   log(`Email enviado a ${CFG.mailTo} (${adjuntos.length} adjunto/s)`);
