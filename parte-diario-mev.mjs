@@ -174,6 +174,8 @@ function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescr
       .replace(/&([a-zA-Z]+);/g, (m, n) => ENT[n] ?? "");
     // Encabezado basura tipo "‰8(èD>KHtN#Š 240800363043408446 32": cortar hasta la primera comilla de la caratula.
     t = t.replace(/^[^"\u201c]{0,60}?\d{15,}\s+\d+\s+(?=["\u201c])/, "");
+    // Otro formato del encabezado basura: "7Z$#>:UN%3 Autos ..." / "8q$#>:@tÁ, Caratula: ...".
+    t = t.replace(/^\S{4,16}[\s,]+(?=(Autos|Car[aá]tula|Expte|Expediente|["\u201c]))/i, "");
     t = t.replace(/\s+/g, " ").trim();
     const max = Number(process.env.PROVEIDO_MAX || 450);
     return t.length > max ? t.slice(0, max).replace(/\s\S*$/, "") + " \u2026 (completo en la MEV)" : t;
@@ -667,7 +669,7 @@ async function main() {
   // Caducidad de instancia PBA (lee cartera-mev.xlsx; independiente de las novedades).
   let caducidadRender = null, caducidadTodas = [], prescripcionTodas = [];
   try {
-    const cad = await calcularCaducidadMev();
+    const cad = await calcularCaducidadMev({ pasosCorrida: paraRegistrar });
     // Caducidad SEMANAL (pedido nov-2026): el lunes va completa y se guarda una foto de
     // los niveles. Martes a viernes solo lo que cambio desde el lunes, mas lo que no puede
     // esperar (INTIMADA o vence en <= 5 dias). CADUCIDAD_SEMANAL=false vuelve a "todos los dias".
