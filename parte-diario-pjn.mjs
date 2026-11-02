@@ -249,33 +249,39 @@ function marcaNegativa(it) {
 // Token cacheado: Chrome es lo que mas memoria usa (~300-400 MB). Si el token de la
 // corrida anterior sigue vigente (claim "exp" del JWT con margen de 3 min), se reusa
 // y no se abre Chrome. El archivo queda solo en el servidor (.gitignore).
-const TOKEN_CACHE = path.resolve(__dirname, ".pjn-token.json");
+// Cuentas del Portal PJN (nov-2026): la principal (PJN_USER) y, opcional, una segunda
+// (PJN_USER_2 / PJN_PASS_2 / PJN_NOMBRE_2) para ver las notificaciones de las causas que
+// firma otro letrado del estudio. Cada cuenta usa su propio perfil de Chrome y su token.
+const CUENTAS = [
+  { nombre: process.env.PJN_NOMBRE || "Soledad", user: CFG.pjnUser, pass: CFG.pjnPass, profileDir: CFG.profileDir, cache: path.resolve(__dirname, ".pjn-token.json"), principal: true },
+  ...(process.env.PJN_USER_2 ? [{ nombre: process.env.PJN_NOMBRE_2 || "Sebastian", user: process.env.PJN_USER_2, pass: process.env.PJN_PASS_2 || "", profileDir: path.resolve(__dirname, ".pjn-profile-2"), cache: path.resolve(__dirname, ".pjn-token-2.json"), principal: false }] : []),
+];
 function expDeJwt(t) {
   try { return JSON.parse(Buffer.from(t.split(".")[1], "base64url").toString("utf8")).exp * 1000 || 0; } catch { return 0; }
 }
-async function obtenerToken() {
+async function obtenerToken(cuenta = CUENTAS[0]) {
   try {
-    const c = JSON.parse(fs.readFileSync(TOKEN_CACHE, "utf8"));
+    const c = JSON.parse(fs.readFileSync(cuenta.cache, "utf8"));
     const exp = expDeJwt(c.token);
     if (exp - Date.now() > 3 * 60000) {
       const r = await fetch(`${API}/eventos/?page=0&pageSize=1&categoria=judicial`, { headers: { Authorization: `Bearer ${c.token}` } });
       if (r.ok) { log(`Token reusado (vence ${new Date(exp).toISOString()}): sin abrir Chrome.`); return c.token; }
     }
   } catch { /* sin cache o invalido */ }
-  const token = await obtenerTokenChrome();
+  const token = await obtenerTokenChrome(cuenta);
   try {
-    fs.writeFileSync(TOKEN_CACHE, JSON.stringify({ token, guardado: new Date().toISOString() }), { mode: 0o600 });
+    fs.writeFileSync(cuenta.cache, JSON.stringify({ token, guardado: new Date().toISOString() }), { mode: 0o600 });
     const exp = expDeJwt(token);
     if (exp) log(`Token nuevo: dura ${Math.round((exp - Date.now()) / 60000)} min.`);
   } catch {}
   return token;
 }
 
-async function obtenerTokenChrome() {
-  fs.mkdirSync(CFG.profileDir, { recursive: true });
+async function obtenerTokenChrome(cuenta = CUENTAS[0]) {
+  fs.mkdirSync(cuenta.profileDir, { recursive: true });
   const browser = await puppeteer.launch({
     headless: CFG.headless ? "new" : false,
-    userDataDir: CFG.profileDir,
+    userDataDir: cuenta.profileDir,
     // Flags para maquina chica (1 GB): sin GPU, sin /dev/shm (usa /tmp), sin
     // extensiones ni procesos extra, y tope de memoria al V8 de las paginas.
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
@@ -304,11 +310,11 @@ async function obtenerTokenChrome() {
     for (let i = 0; i < 15 && !token; i++) await sleep(1000);
 
     if (!token && page.url().includes("sso.pjn.gov.ar")) {
-      if (!CFG.pjnUser || !CFG.pjnPass) throw new Error("Sesion caducada y faltan PJN_USER/PJN_PASS en .env para re-loguear.");
+      if (!cuenta.user || !cuenta.pass) throw new Error(`Sesion caducada y faltan usuario/clave de la cuenta ${cuenta.nombre} en .env para re-loguear.`);
       log("Sesion caducada: completando login del SSO con credenciales del .env");
       await page.waitForSelector("#username", { timeout: 20000 });
-      await page.type("#username", CFG.pjnUser, { delay: 15 });
-      await page.type("#password", CFG.pjnPass, { delay: 15 });
+      await page.type("#username", cuenta.user, { delay: 15 });
+      await page.type("#password", cuenta.pass, { delay: 15 });
       await Promise.all([
         page.click("#kc-login").catch(() => page.keyboard.press("Enter")),
         page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {}),
@@ -509,8 +515,9 @@ function armarParte(nuevos, ventanaDesc, fallos, caducidad, penal, agenda = []) 
       for (const it of eventos) {
         const prio = esPrioritario(it) ? " [PRIORITARIA]" : "";
         const pdf = it.hasDocument ? `  [PDF: evento ${it.id}]` : "";
-        texto += `  - [${letra(it.tipo)}] ${fmtFecha(it.fechaAccion)}${prio}${pdf}\n`;
-        html += `<li>[<b>${letra(it.tipo)}</b>] ${fmtFecha(it.fechaAccion)}${prio ? ` <span style="color:#8b1e1e">[PRIORITARIA]</span>` : ""}${it.hasDocument ? ` &mdash; PDF adjunto` : ""}</li>`;
+        const cta = CUENTAS.length > 1 && it.__cuenta ? ` (cuenta ${it.__cuenta})` : "";
+        texto += `  - [${letra(it.tipo)}] ${fmtFecha(it.fechaAccion)}${prio}${pdf}${cta}\n`;
+        html += `<li>[<b>${letra(it.tipo)}</b>] ${fmtFecha(it.fechaAccion)}${prio ? ` <span style="color:#8b1e1e">[PRIORITARIA]</span>` : ""}${it.hasDocument ? ` &mdash; PDF adjunto` : ""}${cta ? ` <span style="color:#777">${cta}</span>` : ""}</li>`;
       }
       texto += "\n"; html += "</ul>";
     }
@@ -622,10 +629,26 @@ async function main() {
   for (const [k, v] of Object.entries({ SMTP_USER: CFG.smtpUser, SMTP_PASS: CFG.smtpPass, MAIL_TO: CFG.mailTo })) {
     if (!v) throw new Error(`Falta ${k} en .env`);
   }
-  log("Iniciando login/captura de token del Portal PJN");
-  const token = await obtenerToken();
-  log("Token capturado; bajando feed /eventos");
-  const items = await traerEventos(token);
+  const tokens = new Map(); // nombre de cuenta -> token
+  const avisosCuentas = [];
+  const items = [];
+  for (const cuenta of CUENTAS) {
+    try {
+      log(`Cuenta ${cuenta.nombre}: login/captura de token del Portal PJN`);
+      const tk = await obtenerToken(cuenta);
+      tokens.set(cuenta.nombre, tk);
+      const lote = await traerEventos(tk);
+      let nuevosLote = 0;
+      for (const it of lote) if (!items.some((x) => String(x.id) === String(it.id))) { it.__cuenta = cuenta.nombre; items.push(it); nuevosLote++; }
+      log(`Cuenta ${cuenta.nombre}: ${lote.length} evento(s) en el feed (${nuevosLote} no repetidos).`);
+    } catch (e) {
+      if (cuenta.principal) throw e; // sin la cuenta principal no hay parte
+      log(`Cuenta ${cuenta.nombre}: FALLO - ${e.message}`);
+      avisosCuentas.push({ clave: `CUENTA ${cuenta.nombre}`, id: "-", motivo: `no se pudo leer el portal con esta cuenta: ${e.message}` });
+    }
+    if (CUENTAS.length > 1) await sleep(3000); // liberar memoria de Chrome entre cuentas
+  }
+  const token = tokens.get(CUENTAS[0].nombre);
 
   const { corte, desc } = calcularCorte();
   log(`Ventana: ${desc} (corte ${new Date(corte).toISOString()})`);
@@ -652,7 +675,12 @@ async function main() {
     return;
   }
 
-  const { adjuntos, fallos, guardados, agenda } = await descargarPdfs(token, nuevos);
+  // PDFs: cada evento se baja con el token de la cuenta que lo vio.
+  const adjuntos = [], fallos = [...avisosCuentas], guardados = [], agenda = [];
+  for (const [nombre, tk] of tokens) {
+    const r = await descargarPdfs(tk, nuevos.filter((it) => (it.__cuenta || CUENTAS[0].nombre) === nombre));
+    adjuntos.push(...r.adjuntos); fallos.push(...r.fallos); guardados.push(...r.guardados); agenda.push(...r.agenda);
+  }
 
   // .ics por cada audiencia detectada, para agendar con un clic (Google Calendar/
   // Outlook/Apple Calendar abren un .ics adjunto directo).
