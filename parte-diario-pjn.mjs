@@ -630,6 +630,8 @@ async function main() {
     if (!v) throw new Error(`Falta ${k} en .env`);
   }
   const tokens = new Map(); // nombre de cuenta -> token
+  const clavesPorCuenta = new Map(); // nombre de cuenta -> Set("FUERO|numero|aa") de causas vistas en su feed
+  const claveDe = (it) => { const m = String(it.payload?.claveExpediente || "").match(/^([A-Z]{2,4})\s+(\d+)\/(\d{2,4})/); return m ? `${m[1]}|${Number(m[2])}|${m[3].slice(-2)}` : null; };
   const avisosCuentas = [];
   const items = [];
   for (const cuenta of CUENTAS) {
@@ -638,6 +640,7 @@ async function main() {
       const tk = await obtenerToken(cuenta);
       tokens.set(cuenta.nombre, tk);
       let lote = await traerEventos(tk);
+      clavesPorCuenta.set(cuenta.nombre, new Set(lote.map(claveDe).filter(Boolean)));
       // Cuenta secundaria: ve TODAS las causas de ese letrado. Solo se toman las que
       // estan en la planilla LISTADO JUICIOS (las que lleva la usuaria). Si la planilla
       // no se puede leer, entra todo (mejor de mas que de menos). PJN_FILTRO_2=todo lo apaga.
@@ -667,6 +670,31 @@ async function main() {
     if (CUENTAS.length > 1) await sleep(3000); // liberar memoria de Chrome entre cuentas
   }
   const token = tokens.get(CUENTAS[0].nombre);
+
+  // FIRMA vacia en la planilla (nov-2026): se completa segun la cuenta donde aparece la
+  // causa (principal -> PJN_FIRMA, default SOLEDAD; segunda -> PJN_FIRMA_2, default
+  // SEBASTIAN; si esta en las dos, la principal). Nunca pisa una firma ya cargada.
+  if (CUENTAS.length > 1) {
+    try {
+      const { obtenerPlanilla } = await import("./lib/planilla-causas.mjs");
+      const { escribirCambios } = await import("./lib/planilla-gestion.mjs");
+      const pl = await obtenerPlanilla();
+      const firmas = [process.env.PJN_FIRMA || "SOLEDAD", process.env.PJN_FIRMA_2 || "SEBASTIAN"];
+      const hoyTxt = new Intl.DateTimeFormat("es-AR", { timeZone: "America/Argentina/Buenos_Aires", dateStyle: "short" }).format(new Date());
+      const cambios = [];
+      for (const f of pl.porSistema?.PJN || []) {
+        if (f.firma || !f.filaHoja) continue;
+        const k = `${f.fuero}|${Number(f.numero)}|${String(f.anio).slice(-2)}`;
+        const i = CUENTAS.findIndex((c) => clavesPorCuenta.get(c.nombre)?.has(k));
+        if (i < 0) continue;
+        cambios.push({ hoja: f.hoja, fila: f.filaHoja, columna: "FIRMA", valor: firmas[i] || CUENTAS[i].nombre.toUpperCase(), tipo: "aplicado", nota: `Completado por el bot el ${hoyTxt}: la causa aparece en las notificaciones del Portal PJN de la cuenta de ${CUENTAS[i].nombre}.` });
+      }
+      if (cambios.length) {
+        const r = await escribirCambios(cambios);
+        log(`Planilla FIRMA: ${r.nota || `${r.hechos} completada(s)${r.errores.length ? `; errores: ${r.errores.join(" | ")}` : ""}`}`);
+      }
+    } catch (e) { log(`Planilla FIRMA omitida: ${e.message}`); }
+  }
 
   const { corte, desc } = calcularCorte();
   log(`Ventana: ${desc} (corte ${new Date(corte).toISOString()})`);

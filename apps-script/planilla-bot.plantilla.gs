@@ -13,7 +13,7 @@
  * en el .env del servidor.
  */
 var TOKEN = 'PEGAR_TOKEN_AQUI';
-var COLUMNAS_BOT = ['VIGILAR', 'CADUCIDAD', 'ULT. IMPULSO'];
+var COLUMNAS_BOT = ['VIGILAR', 'CADUCIDAD', 'ULT. IMPULSO', 'FIRMA'];
 
 function json_(o) {
   return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
