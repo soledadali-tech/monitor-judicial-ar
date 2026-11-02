@@ -163,8 +163,23 @@ function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescr
   // Texto completo del proveido de cada novedad (la MEV no sirve PDFs; esto es lo
   // mas cercano a "adjuntar el documento" — ver lib/mev-busqueda-planilla.mjs para
   // el resto del contexto de esta corrida). Se muestra siempre que se pudo leer.
-  const textoProveido = (p) => p ? `        proveido: ${String(p).replace(/\n/g, "\n        ")}\n` : "";
-  const htmlProveido = (p) => p ? `<div style="margin:4px 0 8px 0;padding:6px 8px;background:#f7f7f7;border-left:3px solid #ccc;font-size:12px;color:#444;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace">${p}</div>` : "";
+  // Proveido legible y corto (pedido nov-2026): decodifica entidades HTML (&ldquo; etc.),
+  // saca el codigo de barras/firma basura del encabezado y corta a PROVEIDO_MAX caracteres.
+  const ENT = { ldquo: "\u201c", rdquo: "\u201d", lsquo: "\u2018", rsquo: "\u2019", hellip: "\u2026", nbsp: " ", amp: "&", quot: '"', lt: "<", gt: ">", ordm: "\u00ba", ordf: "\u00aa", deg: "\u00b0", iexcl: "\u00a1", iquest: "\u00bf",
+    aacute: "\u00e1", eacute: "\u00e9", iacute: "\u00ed", oacute: "\u00f3", uacute: "\u00fa", ntilde: "\u00f1", uuml: "\u00fc",
+    Aacute: "\u00c1", Eacute: "\u00c9", Iacute: "\u00cd", Oacute: "\u00d3", Uacute: "\u00da", Ntilde: "\u00d1", Uuml: "\u00dc" };
+  const limpiar = (p) => {
+    let t = String(p || "")
+      .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+      .replace(/&([a-zA-Z]+);/g, (m, n) => ENT[n] ?? "");
+    // Encabezado basura tipo "‰8(èD>KHtN#Š 240800363043408446 32": cortar hasta la primera comilla de la caratula.
+    t = t.replace(/^[^"\u201c]{0,60}?\d{15,}\s+\d+\s+(?=["\u201c])/, "");
+    t = t.replace(/\s+/g, " ").trim();
+    const max = Number(process.env.PROVEIDO_MAX || 450);
+    return t.length > max ? t.slice(0, max).replace(/\s\S*$/, "") + " \u2026 (completo en la MEV)" : t;
+  };
+  const textoProveido = (p) => p ? `        proveido: ${limpiar(p)}\n` : "";
+  const htmlProveido = (p) => p ? `<div style="margin:4px 0 8px 0;padding:6px 8px;background:#f7f7f7;border-left:3px solid #ccc;font-size:12px;color:#444">${limpiar(p).replace(/</g, "&lt;")}</div>` : "";
 
   let texto = `Parte diario MEV - SCBA (Provincia de Buenos Aires) - ${fecha}\nVentana: ${ventanaDesc}. ${novedades.length} novedad(es) en ${porCausa.size} causa(s). Vigiladas: ${vigiladas}.\n\n`;
   let html = `<h2>Parte diario MEV - SCBA (Provincia de Buenos Aires)</h2><p><b>${fecha}</b><br>Ventana: ${ventanaDesc}. ${novedades.length} novedad(es) en ${porCausa.size} causa(s). Causas vigiladas: ${vigiladas}.</p>`;
@@ -255,8 +270,9 @@ function armarParte(novedades, ventanaDesc, vigiladas, fallos, caducidad, prescr
     for (const { paso: p, proveido } of pasos) {
       const prio = esPrioritario(p) ? " [PRIORITARIA]" : "";
       const firm = p.firmado ? " (firmado)" : "";
-      texto += `  - ${p.fechaHora || p.fecha} ${p.descripcion}${prio}${firm}\n${textoProveido(proveido)}`;
-      html += `<li><b>${p.fechaHora || p.fecha}</b> ${p.descripcion}${prio ? ` <span style="color:#1e3a8b">[PRIORITARIA]</span>` : ""}${firm}${htmlProveido(proveido)}</li>`;
+      const yaArriba = !!prio; // el proveido de las prioritarias ya se mostro arriba: no repetirlo
+      texto += `  - ${p.fechaHora || p.fecha} ${p.descripcion}${prio}${firm}\n${yaArriba ? "" : textoProveido(proveido)}`;
+      html += `<li><b>${p.fechaHora || p.fecha}</b> ${p.descripcion}${prio ? ` <span style="color:#1e3a8b">[PRIORITARIA - ver arriba]</span>` : ""}${firm}${yaArriba ? "" : htmlProveido(proveido)}</li>`;
     }
     texto += "\n"; html += "</ul>";
   }
