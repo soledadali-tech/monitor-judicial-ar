@@ -637,10 +637,28 @@ async function main() {
       log(`Cuenta ${cuenta.nombre}: login/captura de token del Portal PJN`);
       const tk = await obtenerToken(cuenta);
       tokens.set(cuenta.nombre, tk);
-      const lote = await traerEventos(tk);
+      let lote = await traerEventos(tk);
+      // Cuenta secundaria: ve TODAS las causas de ese letrado. Solo se toman las que
+      // estan en la planilla LISTADO JUICIOS (las que lleva la usuaria). Si la planilla
+      // no se puede leer, entra todo (mejor de mas que de menos). PJN_FILTRO_2=todo lo apaga.
+      if (!cuenta.principal && (process.env.PJN_FILTRO_2 || "planilla") === "planilla") {
+        try {
+          const { obtenerPlanilla } = await import("./lib/planilla-causas.mjs");
+          const pl = await obtenerPlanilla();
+          const claves = new Set((pl.porSistema?.PJN || []).map((f) => `${f.fuero}|${Number(f.numero)}|${String(f.anio).slice(-2)}`));
+          if (claves.size) {
+            const antes = lote.length;
+            lote = lote.filter((it) => {
+              const m = String(it.payload?.claveExpediente || "").match(/^([A-Z]{2,4})\s+(\d+)\/(\d{2,4})/);
+              return m && claves.has(`${m[1]}|${Number(m[2])}|${m[3].slice(-2)}`);
+            });
+            log(`Cuenta ${cuenta.nombre}: ${lote.length} de ${antes} evento(s) son de causas de la planilla.`);
+          }
+        } catch (e) { log(`Cuenta ${cuenta.nombre}: no se pudo filtrar por planilla (${e.message}); entra todo.`); }
+      }
       let nuevosLote = 0;
       for (const it of lote) if (!items.some((x) => String(x.id) === String(it.id))) { it.__cuenta = cuenta.nombre; items.push(it); nuevosLote++; }
-      log(`Cuenta ${cuenta.nombre}: ${lote.length} evento(s) en el feed (${nuevosLote} no repetidos).`);
+      log(`Cuenta ${cuenta.nombre}: ${lote.length} evento(s) tomados (${nuevosLote} no repetidos).`);
     } catch (e) {
       if (cuenta.principal) throw e; // sin la cuenta principal no hay parte
       log(`Cuenta ${cuenta.nombre}: FALLO - ${e.message}`);
