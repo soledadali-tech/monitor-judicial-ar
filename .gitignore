@@ -84,3 +84,6 @@ planilla-migrada.json
 planilla-sugerencias.json
 .pjn-token-2.json
 .pjn-profile-2/
+
+# Almacen propio de causas (datos de clientes): nunca al repo.
+data/

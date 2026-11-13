@@ -779,7 +779,7 @@ async function main() {
   // lib/sync-supabase.mjs. No-op si SUPABASE_URL/SUPABASE_SERVICE_KEY no estan en .env.
   try {
     const { configSupabase, sincronizarCasos } = await import("./lib/sync-supabase.mjs");
-    if (configSupabase()) {
+    { // el almacen local no necesita configuracion; Supabase solo si esta en .env (ver sincronizarCasos)
       const { filasParaSync, extraerFueroNumAnio } = await import("./lib/cartera.mjs");
       const { obtenerPlanilla } = await import("./lib/planilla-causas.mjs");
       const filas = await filasParaSync();
@@ -819,7 +819,10 @@ async function main() {
       const rs = await sincronizarCasos({ sistema: "PJN", causas });
       if (rs.nota) log(`Sync Supabase: ${rs.nota}`);
       else {
-        log(`Sync Supabase: ${rs.actualizados} actualizado(s), ${rs.creados} creado(s), ${rs.sinCambios} sin cambios.`);
+        log(`Sync casos (local): ${rs.actualizados} actualizado(s), ${rs.creados} creado(s), ${rs.sinCambios} sin cambios.${rs.supabaseError ? " Supabase fallo: " + rs.supabaseError : ""}`);
+        if (rs.sinOrigen && rs.sinOrigen.length) log(`Sync casos: ${rs.sinOrigen.length} sin origen cruzado con la planilla: ${rs.sinOrigen.join(", ")}`);
+        if (rs.descartadas && rs.descartadas.length) log(`Sync casos: ${rs.descartadas.length} causa(s) del monitor desestimadas por no figurar en la planilla: ${rs.descartadas.join(", ")}`);
+        if (rs.planillaSinCausa && rs.planillaSinCausa.length) log(`Sync casos: ${rs.planillaSinCausa.length} fila(s) de la planilla sin causa detectada todavia: ${rs.planillaSinCausa.join(", ")}`);
         if (rs.ambiguos.length) log(`Sync Supabase: ${rs.ambiguos.length} ambiguo(s) (revisar a mano): ${rs.ambiguos.map((a) => `${a.numero}${a.inc ? "/inc" + a.inc : ""}`).join(", ")}`);
         if (rs.errores.length) log(`Sync Supabase: ${rs.errores.length} error(es): ${rs.errores.map((e) => `${e.numero}: ${e.error}`).join(" | ")}`);
       }

@@ -136,6 +136,13 @@ async function main() {
     }
   } catch (e) { log(`Foto semanal omitida: ${e.message}`); }
 
+  // Avisos de la pestaña SRT (alta medica + 30 dias). Nunca rompe el parte: si falla, avisa en el mail.
+  let srt = { bloque: null, asunto: "" };
+  try { srt = await (await import("./lib/srt-avisos.mjs")).avisosSrt(isoHoy); }
+  catch (e) { log(`Avisos SRT omitidos: ${e.message}`); }
+  if (srt.error) log(`Avisos SRT: error leyendo la pestaña: ${srt.error}`);
+  else if (srt.vencidos.length || srt.porVencer.length) log(`Avisos SRT: ${srt.vencidos.length} vencido(s), ${srt.porVencer.length} por vencer.`);
+
   const novedades = (pjn?.novedades || 0) + (mev?.novedades || 0);
   const prioritarias = (pjn?.prioritarias || 0) + (mev?.prioritarias || 0);
   const hayFalla = !pjn || !mev || !!mev?.falla;
@@ -146,16 +153,16 @@ async function main() {
   // Asunto: banderas de MEV (clave/falla/caducidad) + prioritarias totales + resumen.
   const flagsMev = (mev?.prefijo || "").replace(/\[\d+ PRIORITARIA\(S\)\] /, "");
   const flagsPjn = (pjn?.prefijo || "").replace(/\[\d+ PRIORITARIA\(S\)\] /, "").replace(/\[REVISION CADUCIDAD/g, "[PJN CADUCIDAD");
-  const asunto = `${esLunes && !tarde ? "[FOTO SEMANAL] " : ""}${!pjn ? "[FALLA PJN] " : ""}${!mev ? "[FALLA MEV] " : ""}${flagsMev}${flagsPjn}${prioritarias ? `[${prioritarias} PRIORITARIA(S)] ` : ""}Parte diario ${fechaCorta}${tarde ? " (tarde)" : ""} - PJN ${pjn ? pjn.novedades : "?"} / MEV ${mev ? mev.novedades : "?"} novedad(es)`;
+  const asunto = `${srt.asunto}${esLunes && !tarde ? "[FOTO SEMANAL] " : ""}${!pjn ? "[FALLA PJN] " : ""}${!mev ? "[FALLA MEV] " : ""}${flagsMev}${flagsPjn}${prioritarias ? `[${prioritarias} PRIORITARIA(S)] ` : ""}Parte diario ${fechaCorta}${tarde ? " (tarde)" : ""} - PJN ${pjn ? pjn.novedades : "?"} / MEV ${mev ? mev.novedades : "?"} novedad(es)`;
 
   const resumenHtml = `<table style="border-collapse:collapse;font-size:14px;margin:6px 0"><tr><td style="padding:2px 10px 2px 0"><b>PJN</b></td><td>${pjn ? `${pjn.novedades} novedad(es), ${pjn.prioritarias} prioritaria(s)` : "<b style='color:#8b1e1e'>no se pudo generar (ver mail de FALLA)</b>"}</td></tr>` +
     `<tr><td style="padding:2px 10px 2px 0"><b>MEV</b></td><td>${mev ? `${mev.novedades} novedad(es), ${mev.prioritarias} prioritaria(s)${mev.falla ? ` &mdash; <b style="color:#8b1e1e">${mev.falla === "total" ? "no se pudo consultar ninguna causa" : `${mev.fallidas} causa(s) sin consultar`}</b>` : ""}` : "<b style='color:#8b1e1e'>no se pudo generar (ver mail de FALLA)</b>"}</td></tr>` +
     `${movidas ? `<tr><td style="padding:2px 10px 2px 0"><b>Semana</b></td><td>${movidas} causa(s) se movieron desde el lunes</td></tr>` : ""}</table>`;
   const sacarH2 = (h) => String(h || "").replace(/^<h2>[^<]*<\/h2>/, "");
-  const html = `<h2 style="margin:0">Parte diario judicial</h2><div style="color:#555">${fechaLarga}${tarde ? " &middot; corrida de la tarde" : ""}</div>${resumenHtml}${bloqueFoto.html}` +
+  const html = `<h2 style="margin:0">Parte diario judicial</h2><div style="color:#555">${fechaLarga}${tarde ? " &middot; corrida de la tarde" : ""}</div>${resumenHtml}${srt.bloque ? srt.bloque.html : ""}${bloqueFoto.html}` +
     `<h2 style="border-bottom:2px solid #1e3a8b;margin-top:18px">PJN - Justicia Nacional</h2>${pjn ? sacarH2(pjn.html) : "<p>Sin datos.</p>"}` +
     `<h2 style="border-bottom:2px solid #1e3a8b;margin-top:18px">MEV - Provincia de Buenos Aires</h2>${mev ? sacarH2(mev.html) : "<p>Sin datos.</p>"}`;
-  const texto = `Parte diario judicial - ${fechaLarga}${tarde ? " (tarde)" : ""}\nPJN: ${pjn ? pjn.novedades + " novedad(es)" : "FALLA"} | MEV: ${mev ? mev.novedades + " novedad(es)" : "FALLA"}\n\n${bloqueFoto.texto}` +
+  const texto = `Parte diario judicial - ${fechaLarga}${tarde ? " (tarde)" : ""}\nPJN: ${pjn ? pjn.novedades + " novedad(es)" : "FALLA"} | MEV: ${mev ? mev.novedades + " novedad(es)" : "FALLA"}\n\n${srt.bloque ? srt.bloque.texto : ""}${bloqueFoto.texto}` +
     `==================== PJN ====================\n${pjn ? pjn.texto : "Sin datos."}\n\n==================== MEV ====================\n${mev ? mev.texto : "Sin datos."}\n`;
   const adjuntos = [...(pjn?.adjuntos || []), ...(mev?.adjuntos || [])];
 
