@@ -644,7 +644,7 @@ async function main() {
       // Cuenta secundaria: ve TODAS las causas de ese letrado. Solo se toman las que
       // estan en la planilla LISTADO JUICIOS (las que lleva la usuaria). Si la planilla
       // no se puede leer, entra todo (mejor de mas que de menos). PJN_FILTRO_2=todo lo apaga.
-      if (!cuenta.principal && (process.env.PJN_FILTRO_2 || "planilla") === "planilla") {
+      if ((process.env.PJN_FILTRO_2 || "planilla") === "planilla") { // tambien la cuenta principal: la planilla manda (causas ajenas = desestimadas)
         try {
           const { obtenerPlanilla } = await import("./lib/planilla-causas.mjs");
           const pl = await obtenerPlanilla();
