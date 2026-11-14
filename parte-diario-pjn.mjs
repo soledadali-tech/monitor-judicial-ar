@@ -225,11 +225,13 @@ const RX_PRIORIDAD = new RegExp(
 function textoEvento(it) {
   const p = it.payload || {};
   return [it.tipo, it.descripcion, it.titulo, it.detalle, it.sintesis,
-    p.descripcion, p.detalle, p.titulo, p.tipoEvento, p.sintesis, p.caratulaExpediente]
+    p.descripcion, p.detalle, p.titulo, p.tipoEvento, p.sintesis, p.caratulaExpediente, it.resolucion]
     .filter(Boolean).join(" | ");
 }
 // Prioritario si matchea una palabra sensible o si es cedula (efecto notificatorio).
 function esPrioritario(it) {
+  // Con el texto del PDF: una cedula de mero tramite ("tengase presente", "agreguese"...) ya no es prioritaria; si tiene palabras sensibles, si.
+  if (it.resolucionClase && it.resolucionClase.tramite && !it.resolucionClase.sensible) return false;
   if (it.tipo === "cedula") return true;
   return RX_PRIORIDAD.test(textoEvento(it));
 }
@@ -417,6 +419,12 @@ async function descargarPdfs(token, nuevos) {
       guardados.push({ claveOriginal, id: it.id, path: full });
     }
     if (CFG.adjuntarPdfs) adjuntos.push({ filename, content: res.buf });
+    // Texto real de la cedula/despacho: la parte dispositiva se guarda y se usa para la prioridad, el parte y la causa.
+    try {
+      const rs = await import("./lib/resoluciones.mjs");
+      const r = rs.extraerResolucion(await rs.textoPdf(res.buf));
+      if (r.cuerpo) { it.resolucion = r.cuerpo; it.resolucionClase = { sensible: r.sensible, tramite: r.tramite }; rs.registrarResolucion({ id: it.id, clave: claveOriginal, tipo: it.tipo, fechaAccion: it.fechaAccion, cuenta: it.__cuenta }, r); }
+    } catch (e) { log(`Texto del PDF ${it.id}: ${e.message}`); }
 
     if (/audiencia|vista de causa/i.test(textoEvento(it))) {
       const r = await detectarAudiencia(res.buf);
@@ -516,8 +524,8 @@ function armarParte(nuevos, ventanaDesc, fallos, caducidad, penal, agenda = []) 
         const prio = esPrioritario(it) ? " [PRIORITARIA]" : "";
         const pdf = it.hasDocument ? `  [PDF: evento ${it.id}]` : "";
         const cta = CUENTAS.length > 1 && it.__cuenta ? ` (cuenta ${it.__cuenta})` : "";
-        texto += `  - [${letra(it.tipo)}] ${fmtFecha(it.fechaAccion)}${prio}${pdf}${cta}\n`;
-        html += `<li>[<b>${letra(it.tipo)}</b>] ${fmtFecha(it.fechaAccion)}${prio ? ` <span style="color:#8b1e1e">[PRIORITARIA]</span>` : ""}${it.hasDocument ? ` &mdash; PDF adjunto` : ""}${cta ? ` <span style="color:#777">${cta}</span>` : ""}</li>`;
+        texto += `  - [${letra(it.tipo)}] ${fmtFecha(it.fechaAccion)}${prio}${pdf}${cta}\n${it.resolucion ? `      > ${it.resolucion.slice(0, 220)}\n` : ""}`;
+        html += `<li>[<b>${letra(it.tipo)}</b>] ${fmtFecha(it.fechaAccion)}${prio ? ` <span style="color:#8b1e1e">[PRIORITARIA]</span>` : ""}${it.hasDocument ? ` &mdash; PDF adjunto` : ""}${cta ? ` <span style="color:#777">${cta}</span>` : ""}${it.resolucion ? `<div style="color:#444;font-size:13px;margin:2px 0 4px 14px">&rarr; ${String(it.resolucion).slice(0, 260).replace(/&/g, "&amp;").replace(/</g, "&lt;")}</div>` : ""}</li>`;
       }
       texto += "\n"; html += "</ul>";
     }
@@ -798,7 +806,7 @@ async function main() {
         const k = `${info.fuero}|${info.numero}|${info.anio2}`;
         const f = new Date(it.fechaAccion || it.fechaCreacion || Date.now());
         const fechaISO = f.toISOString().slice(0, 10);
-        const descripcion = (it.payload?.tipoEvento || it.payload?.titulo || it.payload?.descripcion || letra(it.tipo) || "Novedad").toString().slice(0, 300);
+        const descripcion = (it.resolucion ? `${letra(it.tipo) === "N" ? "Cedula" : "Despacho"}: ${it.resolucion}` : (it.payload?.tipoEvento || it.payload?.titulo || it.payload?.descripcion || letra(it.tipo) || "Novedad")).toString().slice(0, 300);
         const relevancia = esPrioritario(it) ? (marcaNegativa(it) ? "critico" : "importante") : "informativo";
         if (!hoyPorClave.has(k)) hoyPorClave.set(k, { ultima: null, novedades: [] });
         const g = hoyPorClave.get(k);

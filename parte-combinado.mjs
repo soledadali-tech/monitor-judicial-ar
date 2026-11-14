@@ -146,6 +146,11 @@ async function main() {
   const novedades = (pjn?.novedades || 0) + (mev?.novedades || 0);
   const prioritarias = (pjn?.prioritarias || 0) + (mev?.prioritarias || 0);
   const hayFalla = !pjn || !mev || !!mev?.falla;
+  // Estado de la corrida para otros programas (el Despacho lo lee): que paso, cuanto y si hubo fallas.
+  try {
+    fs.mkdirSync(path.resolve(__dirname, "data"), { recursive: true });
+    fs.writeFileSync(path.resolve(__dirname, "data", "estado-monitor.json"), JSON.stringify({ corrida: new Date().toISOString(), tarde, forzada: !!process.env.FORZAR, pjn: { codigo: cPjn, ok: !!pjn, novedades: pjn?.novedades || 0, prioritarias: pjn?.prioritarias || 0 }, mev: { codigo: cMev, ok: !!mev, novedades: mev?.novedades || 0, prioritarias: mev?.prioritarias || 0, falla: mev?.falla || "" }, srt: { vencidos: srt.vencidos?.length || 0, porVencer: srt.porVencer?.length || 0 }, horarios: ["08:00", "18:00"] }, null, 1));
+  } catch (e) { log(`estado-monitor.json: ${e.message}`); }
   if (tarde && !novedades && !prioritarias && !hayFalla && !process.env.FORZAR) { log("Tarde sin novedades ni fallas: no se manda mail."); return; }
 
   const fechaCorta = new Intl.DateTimeFormat("es-AR", { timeZone: "America/Argentina/Buenos_Aires", dateStyle: "short" }).format(new Date());
